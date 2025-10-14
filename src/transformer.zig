@@ -195,6 +195,90 @@ pub const MultiHeadAttention = struct {
     }
 };
 
+pub const MLP = struct {
+    d_model: usize,
+    d_ff: usize,
+    w1: []f32,
+    b1: []f32,
+    w2: []f32,
+    b2: []f32,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, d_model: usize) !MLP {
+        const d_ff = d_model * 4;
+
+        const w1 = try allocator.alloc(f32, d_model * d_ff);
+        errdefer allocator.free(w1);
+
+        const b1 = try allocator.alloc(f32, d_ff);
+        errdefer allocator.free(b1);
+
+        const w2 = try allocator.alloc(f32, d_ff * d_model);
+        errdefer allocator.free(w2);
+
+        const b2 = try allocator.alloc(f32, d_model);
+        errdefer allocator.free(b2);
+
+        var prng = std.Random.DefaultPrng.init(2024);
+        const random = prng.random();
+        const scale1 = @sqrt(1.0 / @as(f32, @floatFromInt(d_model)));
+        const scale2 = @sqrt(1.0 / @as(f32, @floatFromInt(d_ff)));
+
+        for (w1) |*w| w.* = (random.float(f32) * 2.0 - 1.0) * scale1;
+        for (w2) |*w| w.* = (random.float(f32) * 2.0 - 1.0) * scale2;
+
+        @memset(b1, 0.0);
+        @memset(b2, 0.0);
+
+        return MLP{
+            .d_model = d_model,
+            .d_ff = d_ff,
+            .w1 = w1,
+            .b1 = b1,
+            .w2 = w2,
+            .b2 = b2,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *MLP) void {
+        self.allocator.free(self.w1);
+        self.allocator.free(self.b1);
+        self.allocator.free(self.w2);
+        self.allocator.free(self.b2);
+    }
+
+    pub fn forward(
+        self: *const MLP,
+        allocator: std.mem.Allocator,
+        x: []const f32,
+        seq_len: usize,
+    ) ![]f32 {
+        var hidden = try matmul(allocator, x, self.w1, seq_len, self.d_model, self.d_ff);
+        defer allocator.free(hidden);
+
+        for (0..seq_len) |i| {
+            const offset = i * self.d_ff;
+            for (0..self.d_ff) |j| {
+                hidden[offset + j] += self.b1[j];
+            }
+        }
+
+        gelu(hidden);
+
+        var output = try matmul(allocator, hidden, self.w2, seq_len, self.d_ff, self.d_model);
+
+        for (0..seq_len) |i| {
+            const offset = i * self.d_model;
+            for (0..self.d_model) |j| {
+                output[offset + j] += self.b2[j];
+            }
+        }
+
+        return output;
+    }
+};
+
 fn scaledDotProductAttention(
     allocator: std.mem.Allocator,
     q: []const f32,
@@ -279,6 +363,18 @@ fn matmul(
     }
 
     return c;
+}
+
+pub fn gelu(x: []f32) void {
+    const sqrt_2_over_pi = @sqrt(2.0 / std.math.pi);
+
+    for (x) |*val| {
+        const x_val = val.*;
+        const x_cubed = x_val * x_val * x_val;
+        const inner = sqrt_2_over_pi * (x_val + 0.044715 * x_cubed);
+        const cdf = 0.5 * (1.0 + std.math.tanh(inner));
+        val.* = x_val * cdf;
+    }
 }
 
 pub const Transformer = struct {

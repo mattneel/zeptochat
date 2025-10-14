@@ -4,6 +4,7 @@ const Transformer = @import("transformer").Transformer;
 const TinyConfig = @import("transformer").TinyConfig;
 const LayerNorm = @import("transformer").LayerNorm;
 const MultiHeadAttention = @import("transformer").MultiHeadAttention;
+const MLP = @import("transformer").MLP;
 
 test "transformer init allocates embeddings" {
     var model = try Transformer.init(testing.allocator, TinyConfig);
@@ -162,4 +163,76 @@ test "attention applies causal mask" {
     }
 
     try testing.expect(different);
+}
+
+test "mlp init allocates parameters" {
+    const d_model = 64;
+
+    var mlp = try MLP.init(testing.allocator, d_model);
+    defer mlp.deinit();
+
+    try testing.expectEqual(d_model, mlp.d_model);
+    try testing.expectEqual(d_model * 4, mlp.d_ff);
+    try testing.expectEqual(d_model * mlp.d_ff, mlp.w1.len);
+    try testing.expectEqual(mlp.d_ff, mlp.b1.len);
+    try testing.expectEqual(mlp.d_ff * d_model, mlp.w2.len);
+    try testing.expectEqual(d_model, mlp.b2.len);
+
+    for (mlp.b1) |b| try testing.expectEqual(@as(f32, 0.0), b);
+    for (mlp.b2) |b| try testing.expectEqual(@as(f32, 0.0), b);
+}
+
+test "mlp forward preserves shape" {
+    const d_model = 32;
+    const seq_len = 6;
+
+    var mlp = try MLP.init(testing.allocator, d_model);
+    defer mlp.deinit();
+
+    const input = try testing.allocator.alloc(f32, seq_len * d_model);
+    defer testing.allocator.free(input);
+    @memset(input, 0.5);
+
+    const output = try mlp.forward(testing.allocator, input, seq_len);
+    defer testing.allocator.free(output);
+
+    try testing.expectEqual(input.len, output.len);
+}
+
+test "mlp gelu non linear" {
+    const d_model = 16;
+    const seq_len = 4;
+
+    var mlp = try MLP.init(testing.allocator, d_model);
+    defer mlp.deinit();
+
+    const input = try testing.allocator.alloc(f32, seq_len * d_model);
+    defer testing.allocator.free(input);
+
+    for (input, 0..) |*val, idx| {
+        val.* = @as(f32, @floatFromInt(idx)) / 10.0;
+    }
+
+    const output = try mlp.forward(testing.allocator, input, seq_len);
+    defer testing.allocator.free(output);
+
+    var different = false;
+    for (input, output) |a, b| {
+        if (@abs(a - b) > 1e-4) {
+            different = true;
+            break;
+        }
+    }
+
+    try testing.expect(different);
+}
+
+test "gelu sanity" {
+    var data = [_]f32{ 0.0, 1.0, -1.0, 2.0 };
+    @import("transformer").gelu(&data);
+
+    try testing.expect(@abs(data[0]) < 0.01);
+    try testing.expect(@abs(data[1] - 0.84) < 0.05);
+    try testing.expect(data[2] < 0);
+    try testing.expect(data[3] > data[1]);
 }

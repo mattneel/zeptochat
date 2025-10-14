@@ -10,21 +10,17 @@ permissions:
 
 jobs:
   build-artifacts:
-    name: Build ${{ matrix.os }} (${{ matrix.arch }})
+    name: Build ${{ matrix.target }}
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
-            arch: x86_64
             target: x86_64-linux
           - os: macos-13
-            arch: x86_64
             target: x86_64-macos
           - os: macos-latest
-            arch: aarch64
             target: aarch64-macos
           - os: windows-latest
-            arch: x86_64
             target: x86_64-windows
 
     runs-on: ${{ matrix.os }}
@@ -33,67 +29,37 @@ jobs:
 
       - uses: jdx/mise-action@v2
 
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxext-dev libxfixes-dev libgl1-mesa-dev libglu1-mesa-dev
-
       - name: Run tests
         run: zig build test -Doptimize=ReleaseFast
 
-      - name: Build all binaries
-        run: zig build install-all -Doptimize=ReleaseFast
+      - name: Build Zeptochat binary
+        run: zig build -Doptimize=ReleaseFast
 
-      - name: Verify build output (Unix)
-        if: runner.os != 'Windows'
-        run: ls -lR zig-out/bin
-
-      - name: Verify build output (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Get-ChildItem -Recurse zig-out\bin
-
-      - name: Package artifacts (Unix)
+      - name: Package artifact (Unix)
         if: runner.os != 'Windows'
         run: |
-          if [ ! -d zig-out ]; then
-            echo "ERROR: zig-out directory not found. Build failed."
-            exit 1
-          fi
-          cd zig-out
-          tar czf ../zamn-${{ github.ref_name }}-${{ matrix.target }}.tar.gz *
-          cd ..
+          mkdir -p artifacts
+          tar czf artifacts/zeptochat-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C zig-out/bin zeptochat
 
-      - name: Package artifacts (Windows)
+      - name: Package artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          if (-not (Test-Path zig-out)) {
-            Write-Error "ERROR: zig-out directory not found. Build failed."
-            exit 1
-          }
-          cd zig-out
-          Compress-Archive -Path * -DestinationPath ../zamn-${{ github.ref_name }}-${{ matrix.target }}.zip
-          cd ..
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Compress-Archive -Path zig-out\bin\zeptochat.exe -DestinationPath artifacts\zeptochat-${{ github.ref_name }}-${{ matrix.target }}.zip
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zamn-${{ matrix.target }}
-          path: |
-            zamn-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-            zamn-${{ github.ref_name }}-${{ matrix.target }}.zip
+          name: zeptochat-${{ matrix.target }}
+          path: artifacts/*
 
   create-release:
     name: Create Release
     needs: build-artifacts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
 

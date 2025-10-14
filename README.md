@@ -33,6 +33,7 @@ zig-out/        # Build artifacts (ignored)
 - **Language Version:** Zig 0.15.1; avoid deprecated constructs such as `usingnamespace`.
 - **Formatting:** `zig fmt` is enforced via CI (`mise run fmt`).
 - **Testing:** Follow test-driven development. Gradient checks and deterministic unit tests live under `tests/` and are aggregated by `tests/all_tests.zig`.
+- **Git Flow:** Cut a named branch (`feature/tokenizer-merges`, `fix/reader-buffers`, etc.) for every change; no direct commits to `master`. Rebase onto `master` before opening a PR.
 - **Build:** `zig build` uses `build.zig` with explicit modules and `root_module` semantics required by Zig 0.15.1.
 - **Documentation:** mdBook-generated docs reside in `docs/` and are built via `mise run docs`.
 

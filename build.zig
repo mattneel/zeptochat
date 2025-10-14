@@ -29,7 +29,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
     const tokenizer_module = b.createModule(.{
         .root_source_file = b.path("src/tokenizer.zig"),
         .target = target,
@@ -41,6 +40,10 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{
         .root_module = test_module,
     });
+    tests.test_runner = .{
+        .path = b.path("tests/test_runner.zig"),
+        .mode = .simple,
+    };
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run tests");

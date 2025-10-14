@@ -45,6 +45,55 @@ test "tokenizer merges simple pair" {
     try std.testing.expectEqualStrings("hi", decoded);
 }
 
+test "tokenizer prefers lowest-rank merge" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.init(allocator);
+    defer tokenizer.deinit();
+
+    try tokenizer.addToken("ab", 300);
+    try tokenizer.addToken("ba", 301);
+
+    try tokenizer.addMerge(.{
+        .left = "a",
+        .right = "b",
+        .result = "ab",
+        .rank = 5,
+    });
+
+    try tokenizer.addMerge(.{
+        .left = "b",
+        .right = "a",
+        .result = "ba",
+        .rank = 1,
+    });
+
+    const tokens = try tokenizer.encode("abab");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 3), tokens.len);
+    try std.testing.expectEqual(@as(u32, 'a'), tokens[0]);
+    try std.testing.expectEqual(@as(u32, 301), tokens[1]);
+    try std.testing.expectEqual(@as(u32, 'b'), tokens[2]);
+}
+
+test "tokenizer rejects merges with unknown symbols" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.init(allocator);
+    defer tokenizer.deinit();
+
+    try tokenizer.addToken("ok", 512);
+
+    const merge_err = tokenizer.addMerge(.{
+        .left = "x",
+        .right = "y",
+        .result = "xy",
+        .rank = 0,
+    });
+    try std.testing.expectError(error.UnknownToken, merge_err);
+}
+
 test "tokenizer loads vocab and merges from buffers" {
     const allocator = std.testing.allocator;
 

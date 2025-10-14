@@ -40,9 +40,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const training_module = b.createModule(.{
+        .root_source_file = b.path("src/training.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    training_module.addImport("transformer", transformer_module);
 
     test_module.addImport("tokenizer", tokenizer_module);
     test_module.addImport("transformer", transformer_module);
+    test_module.addImport("training", training_module);
 
     const tests = b.addTest(.{
         .root_module = test_module,

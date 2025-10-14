@@ -1,30 +1,30 @@
 # Roadmap
 
 ## Setup
-- [ ] Initialize git repo
-- [ ] Create directory structure
-- [ ] Configure `build.zig` for Zig 0.15.1 (`root_module`)
-- [ ] Finalize `.mise.toml` with required tools
-- [ ] Author `README.md`
-- [ ] Scaffold `docs/` for mdBook
+- [x] Initialize git repo
+- [x] Create directory structure
+- [x] Configure `build.zig` for Zig 0.15.1 (`root_module`)
+- [x] Finalize `.mise.toml` with required tools
+- [x] Author `README.md`
+- [x] Scaffold `docs/` for mdBook
 
 ## Phase 1 · CPU Baseline
-- [ ] Tokenizer  
-  - [ ] BPE encode  
-  - [ ] BPE decode  
-  - [ ] Vocab/merges loading  
-  - [ ] Tests: round-trip, known examples
-- [ ] Transformer  
-  - [ ] Embeddings (token + position)  
-  - [ ] Multi-head attention  
-  - [ ] MLP with GELU  
-  - [ ] Layer norm  
-  - [ ] Forward pass  
-  - [ ] Tests: shape checking, reference comparison
-- [ ] Backpropagation  
-  - [ ] Manual gradient computation  
-  - [ ] Backward pass implementation  
-  - [ ] Tests: gradient checking
+- [x] Tokenizer  
+  - [x] BPE encode  
+  - [x] BPE decode  
+  - [x] Vocab/merges loading  
+  - [x] Tests: round-trip, known examples
+- [x] Transformer  
+  - [x] Embeddings (token + position)  
+  - [x] Multi-head attention  
+  - [x] MLP with GELU  
+  - [x] Layer norm  
+  - [x] Forward pass  
+  - [x] Tests: shape checking, reference comparison
+- [x] Backpropagation  
+  - [x] Manual gradient computation  
+  - [x] Backward pass implementation  
+  - [x] Tests: gradient checking
 - [ ] Optimizer (AdamW)  
   - [ ] Weight decay  
   - [ ] Parameter updates  
@@ -32,10 +32,10 @@
 - [ ] Training Loop  
   - [ ] Data loading (0.15.1 Reader API)  
   - [ ] Batch iteration  
-  - [ ] Forward/backward/update loop  
-  - [ ] Loss calculation  
+  - [x] Forward/backward/update loop  
+  - [x] Loss calculation  
   - [ ] Logging (buffered Writer API)  
-  - [ ] Tests: overfit single batch
+  - [x] Tests: overfit single batch
 
 ## Phase 2 · SIMD
 - [ ] Benchmark harness

@@ -22,7 +22,7 @@ run = "zig build test --summary all"
 
 [tasks."test:opt"]
 description = "Run tests optimized"
-run = "zig build test -Doptimize=ReleaseFast --summary all"
+run = "zig build test --summary all -Doptimize=ReleaseFast"
 
 [tasks.bench]
 description = "Run benchmarks"

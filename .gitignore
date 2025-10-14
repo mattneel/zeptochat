@@ -1,0 +1,36 @@
+# Zig
+zig-out/
+zig-cache/
+.zig-cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Mise
+.mise.local.toml
+
+# Python (for future benchmarks)
+.venv/
+__pycache__/
+*.pyc
+
+# Metrics
+*.jsonl
+# Checkpoints
+checkpoints/

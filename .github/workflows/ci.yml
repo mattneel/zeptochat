@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - name: Check formatting
+        run: mise run fmt
+
+  test:
+    name: Test
+    strategy:
+      matrix:
+        include:
+          # x86_64
+          - os: ubuntu-latest
+            arch: x86_64
+            optimize: Debug
+          - os: ubuntu-latest
+            arch: x86_64
+            optimize: ReleaseFast
+          - os: windows-latest
+            arch: x86_64
+            optimize: Debug
+          - os: windows-latest
+            arch: x86_64
+            optimize: ReleaseFast
+          - os: macos-13  # Intel
+            arch: x86_64
+            optimize: Debug
+          - os: macos-13  # Intel
+            arch: x86_64
+            optimize: ReleaseFast
+
+          # ARM64
+          # TODO: Re-enable Linux ARM64 when runners are available
+          # - os: ubuntu-24.04-arm64
+          #   arch: aarch64
+          #   optimize: Debug
+          # - os: ubuntu-24.04-arm64
+          #   arch: aarch64
+          #   optimize: ReleaseFast
+          - os: macos-latest  # Apple Silicon
+            arch: aarch64
+            optimize: Debug
+          - os: macos-latest  # Apple Silicon
+            arch: aarch64
+            optimize: ReleaseFast
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - name: Run tests
+        run: zig build test -Doptimize=${{ matrix.optimize }}
+
+      - name: Display CPU info (Linux)
+        if: runner.os == 'Linux'
+        run: lscpu || true
+
+      - name: Display CPU info (macOS)
+        if: runner.os == 'macOS'
+        run: sysctl -a | grep machdep.cpu || true
+
+  build-examples:
+    name: Build Examples
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: windows-latest
+            arch: x86_64
+          - os: macos-13
+            arch: x86_64
+          # TODO: Re-enable Linux ARM64 when runners are available
+          # - os: ubuntu-24.04-arm64
+          #   arch: aarch64
+          - os: macos-latest
+            arch: aarch64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - name: Build CartPole example
+        run: zig build example
+
+      - name: Run example (smoke test - Unix)
+        run: timeout 5 ./zig-out/bin/cartpole || true
+        if: runner.os != 'Windows'
+
+      - name: Run example (smoke test - Windows)
+        shell: pwsh
+        run: |
+          $job = Start-Job -ScriptBlock { & ./zig-out/bin/cartpole.exe }
+          Wait-Job $job -Timeout 5
+          Stop-Job $job
+        if: runner.os == 'Windows'
+
+  docs:
+    name: Build Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - name: Build docs
+        run: mise run docs
+
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: zig-out/docs/
+
+  # Gate: All must pass
+  ci-success:
+    name: CI Success
+    needs: [lint, test, build-examples, docs]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "All CI checks passed ✅"

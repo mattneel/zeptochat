@@ -1,0 +1,29 @@
+name: Benchmark
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'bench/**'
+  push:
+    branches: [master, main]
+
+jobs:
+  benchmark:
+    name: Performance Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@v2
+
+      - name: Build and run benchmark
+        run: mise run bench
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: zig-out/

@@ -1,0 +1,122 @@
+[tools]
+zig = "0.15.1"
+act = "latest"
+mdbook = "latest"
+
+[env]
+# CUDA support (when we add it)
+# CUDA_HOME = "/usr/local/cuda"
+# LD_LIBRARY_PATH = "/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+
+[tasks.fmt]
+description = "Check formatting"
+run = "zig fmt --check ."
+
+[tasks."fmt:fix"]
+description = "Fix formatting"
+run = "zig fmt ."
+
+[tasks.test]
+description = "Run all tests"
+run = "zig build test"
+
+[tasks."test:opt"]
+description = "Run tests optimized"
+run = "zig build test -Doptimize=ReleaseFast"
+
+[tasks.bench]
+description = "Run benchmarks"
+run = "zig build bench -Doptimize=ReleaseFast"
+run_windows = "zig build bench -Doptimize=ReleaseFast"
+
+[tasks."bench:puffer"]
+description = "Benchmark against PufferLib (requires Python)"
+run = """
+python3 -m venv .venv
+source .venv/bin/activate
+pip install pufferlib gymnasium
+python bench/puffer_comparison/compare.py
+"""
+run_windows = """
+python -m venv .venv
+.venv\\Scripts\\activate.bat
+pip install pufferlib gymnasium
+python bench\\puffer_comparison\\compare.py
+"""
+
+[tasks.example]
+description = "Run CartPole example"
+run = "./zig-out/bin/cartpole"
+run_windows = ".\\zig-out\\bin\\cartpole.exe"
+
+[tasks."example:build"]
+description = "Build CartPole example"
+run = "zig build example"
+
+[tasks.ppo]
+description = "Run PPO training on CartPole"
+run = "zig build ppo -Doptimize=ReleaseFast"
+
+[tasks.render]
+description = "Visualize trained CartPole agent"
+run = "zig build render -Doptimize=ReleaseFast"
+
+[tasks."render:record"]
+description = "Record video of trained agent"
+run = """
+mkdir -p frames renders
+echo "Press Space in window to start recording, ESC when done"
+zig build render -Doptimize=ReleaseFast
+if [ -d frames ] && [ "$(ls -A frames)" ]; then
+  ffmpeg -y -framerate 60 -i frames/frame_%06d.png -c:v libx264 -pix_fmt yuv420p renders/cartpole_solved.mp4
+  rm -rf frames
+  echo "✅ Video saved to renders/cartpole_solved.mp4"
+fi
+"""
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = "rm -rf zig-out zig-cache .zig-cache"
+run_windows = "if exist zig-out rmdir /s /q zig-out && if exist zig-cache rmdir /s /q zig-cache && if exist .zig-cache rmdir /s /q .zig-cache"
+
+[tasks.docs]
+description = "Build documentation"
+run = "mdbook build docs"
+
+[tasks."docs:serve"]
+description = "Serve docs locally"
+run = "mdbook serve docs --open"
+
+[tasks."docs:watch"]
+description = "Watch and rebuild docs"
+run = "mdbook watch docs"
+
+[tasks.ci]
+description = "Run all CI checks"
+run = "mise run fmt && mise run test && mise run test:opt"
+
+[tasks."ci:local"]
+description = "Test CI with act"
+run = "act pull_request"
+
+[tasks."ci:job"]
+description = "Test specific CI job with act"
+run = "act pull_request -j $1"
+
+[tasks.hooks]
+description = "Install git hooks"
+run = """
+#!/usr/bin/env bash
+mkdir -p .git/hooks
+cat > .git/hooks/pre-commit << 'EOF'
+#!/bin/sh
+mise run ci
+EOF
+chmod +x .git/hooks/pre-commit
+echo "✅ Git hooks installed"
+"""
+run_windows = """
+if not exist .git\\hooks mkdir .git\\hooks
+echo mise run ci > .git\\hooks\\pre-commit
+echo ✅ Git hooks installed
+"""

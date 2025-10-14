@@ -72,6 +72,10 @@ pub const Tokenizer = struct {
         return self.vocab_size;
     }
 
+    pub fn lookupTokenId(self: *const Tokenizer, symbol: []const u8) ?u32 {
+        return self.token_lookup.get(symbol);
+    }
+
     fn pairKey(left: u32, right: u32) u64 {
         return (@as(u64, left) << 32) | @as(u64, right);
     }
@@ -166,14 +170,13 @@ pub const Tokenizer = struct {
     pub fn loadVocabFromBytes(self: *Tokenizer, bytes: []const u8) Error!void {
         var line_it = std.mem.splitScalar(u8, bytes, '\n');
         while (line_it.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \t\r");
-            if (trimmed.len == 0) continue;
-            if (trimmed[0] == '#') continue;
+            const trimmed_right = std.mem.trimRight(u8, line, "\r");
+            if (trimmed_right.len == 0) continue;
+            if (trimmed_right[0] == '#') continue;
 
-            const sep = std.mem.indexOfAny(u8, trimmed, " \t") orelse return Error.InvalidFormat;
-            const id_slice = trimmed[0..sep];
-            const symbol_part = trimmed[sep + 1 ..];
-            const symbol_slice = std.mem.trimRight(u8, symbol_part, " \t\r");
+            const sep = std.mem.indexOfScalar(u8, trimmed_right, ' ') orelse return Error.InvalidFormat;
+            const id_slice = trimmed_right[0..sep];
+            const symbol_slice = trimmed_right[sep + 1 ..];
             if (symbol_slice.len == 0) return Error.InvalidFormat;
 
             const id = std.fmt.parseInt(u32, id_slice, 10) catch return Error.InvalidFormat;
@@ -183,6 +186,9 @@ pub const Tokenizer = struct {
 
     pub fn loadMergesFromBytes(self: *Tokenizer, bytes: []const u8) Error!void {
         var auto_rank = self.next_merge_rank;
+        var result_buffer = std.ArrayList(u8){};
+        defer result_buffer.deinit(self.allocator);
+
         var line_it = std.mem.splitScalar(u8, bytes, '\n');
         while (line_it.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
@@ -199,7 +205,7 @@ pub const Tokenizer = struct {
                 count += 1;
             }
 
-            if (count < 3) {
+            if (count < 2) {
                 return Error.InvalidFormat;
             }
 
@@ -211,12 +217,29 @@ pub const Tokenizer = struct {
                 auto_rank += 1;
             }
 
-            try self.addMerge(.{
+            const result_slice = if (count >= 3) parts[2] else blk: {
+                const needed = parts[0].len + parts[1].len;
+                try result_buffer.ensureTotalCapacity(self.allocator, needed);
+                result_buffer.items.len = 0;
+                result_buffer.appendSliceAssumeCapacity(parts[0]);
+                result_buffer.appendSliceAssumeCapacity(parts[1]);
+                break :blk result_buffer.items;
+            };
+
+            self.addMerge(.{
                 .left = parts[0],
                 .right = parts[1],
-                .result = parts[2],
+                .result = result_slice,
                 .rank = rank,
-            });
+            }) catch |err| switch (err) {
+                Error.UnknownToken, Error.DuplicateMerge => {
+                    result_buffer.clearRetainingCapacity();
+                    continue;
+                },
+                else => return err,
+            };
+
+            result_buffer.clearRetainingCapacity();
         }
 
         if (auto_rank > self.next_merge_rank) {

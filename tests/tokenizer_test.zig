@@ -218,3 +218,20 @@ test "tokenizer init from files" {
     try std.testing.expectEqual(@as(usize, 1), tokens.len);
     try std.testing.expectEqual(@as(u32, 256), tokens[0]);
 }
+
+test "tokenizer gpt2 fixture known tokens" {
+    const allocator = std.testing.allocator;
+    const cwd = std.fs.cwd();
+
+    var tokenizer = try Tokenizer.initFromDir(
+        allocator,
+        cwd,
+        "tests/fixtures/gpt2_mini/vocab.txt",
+        "tests/fixtures/gpt2_mini/merges.txt",
+    );
+    defer tokenizer.deinit();
+
+    try std.testing.expectEqual(@as(u32, 262), tokenizer.lookupTokenId("Ġthe").?);
+    try std.testing.expectEqual(@as(u32, 290), tokenizer.lookupTokenId("Ġand").?);
+    try std.testing.expectEqual(@as(u32, 995), tokenizer.lookupTokenId("Ġworld").?);
+}

@@ -271,6 +271,7 @@ pub const Tokenizer = struct {
 - Allocate with provided allocator, never implicit
 - Expose `init(allocator, vocab_path, merges_path)` for file-backed vocab with a convenience `initEmpty` to help tests inject tokens directly.
 - Maintain 256 byte-level base tokens; `vocabSize()` should reflect base tokens plus any learned entries.
+- Provide `registerSpecialToken` so sentinels like `<|endoftext|>` can be appended (auto id or explicit) and surfaced via `lookupTokenId`.
 - Ensure byte-level fallback so UTF-8 sequences outside the vocab degrade to individual byte tokens and decode losslessly.
 
 ### 2. Transformer Architecture

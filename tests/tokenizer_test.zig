@@ -182,6 +182,24 @@ test "tokenizer reports vocab size including merges" {
     try std.testing.expectEqual(@as(usize, 257), tokenizer.vocabSize());
 }
 
+test "tokenizer registers special tokens" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.initEmpty(allocator);
+    defer tokenizer.deinit();
+
+    const eos_id = try tokenizer.registerSpecialToken("<|eot|>", null);
+    try std.testing.expect(eos_id >= 256);
+    try std.testing.expectEqual(eos_id, tokenizer.lookupTokenId("<|eot|>").?);
+    try std.testing.expectEqual(@as(usize, 257), tokenizer.vocabSize());
+
+    const explicit_id = 400;
+    const assigned = try tokenizer.registerSpecialToken("<|pad|>", explicit_id);
+    try std.testing.expectEqual(explicit_id, assigned);
+    try std.testing.expectEqual(@as(usize, 258), tokenizer.vocabSize());
+    try std.testing.expectEqual(explicit_id, tokenizer.lookupTokenId("<|pad|>").?);
+}
+
 test "tokenizer init from files" {
     const allocator = std.testing.allocator;
 

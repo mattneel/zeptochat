@@ -21,7 +21,8 @@ pub const Tokenizer = struct {
     token_bytes: std.AutoHashMap(u32, []u8),
     merges: std.AutoHashMap(u64, Merge),
     next_merge_rank: u32,
-    vocab_size: usize,
+    extra_token_count: usize,
+    next_token_id: u32,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -54,7 +55,8 @@ pub const Tokenizer = struct {
             .token_bytes = std.AutoHashMap(u32, []u8).init(allocator),
             .merges = std.AutoHashMap(u64, Merge).init(allocator),
             .next_merge_rank = 0,
-            .vocab_size = base_token_count,
+            .extra_token_count = 0,
+            .next_token_id = base_token_count,
         };
     }
 
@@ -69,7 +71,7 @@ pub const Tokenizer = struct {
     }
 
     pub fn vocabSize(self: *const Tokenizer) usize {
-        return self.vocab_size;
+        return base_token_count + self.extra_token_count;
     }
 
     pub fn lookupTokenId(self: *const Tokenizer, symbol: []const u8) ?u32 {
@@ -136,7 +138,10 @@ pub const Tokenizer = struct {
         };
 
         if (id >= base_token_count) {
-            self.vocab_size += 1;
+            self.extra_token_count += 1;
+        }
+        if (id >= self.next_token_id) {
+            self.next_token_id = id + 1;
         }
     }
 
@@ -165,6 +170,22 @@ pub const Tokenizer = struct {
         if (params.rank >= self.next_merge_rank) {
             self.next_merge_rank = params.rank + 1;
         }
+    }
+
+    pub fn registerSpecialToken(
+        self: *Tokenizer,
+        symbol: []const u8,
+        maybe_id: ?u32,
+    ) Error!u32 {
+        if (self.token_lookup.get(symbol)) |existing| {
+            return existing;
+        }
+        const assigned_id = maybe_id orelse self.next_token_id;
+        try self.addToken(symbol, assigned_id);
+        if (maybe_id == null) {
+            self.next_token_id = assigned_id + 1;
+        }
+        return assigned_id;
     }
 
     pub fn loadVocabFromBytes(self: *Tokenizer, bytes: []const u8) Error!void {

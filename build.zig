@@ -45,4 +45,19 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_tests.step);
+
+    const bench_module = b.createModule(.{
+        .root_source_file = b.path("examples/benchmark.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+
+    const bench_exe = b.addExecutable(.{
+        .name = "benchmark",
+        .root_module = bench_module,
+    });
+
+    const run_bench = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run benchmarks");
+    bench_step.dependOn(&run_bench.step);
 }

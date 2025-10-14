@@ -1,0 +1,10 @@
+[book]
+title = "Zeptochat Manual"
+authors = ["Zeptochat Contributors"]
+language = "en"
+multilingual = false
+src = "src"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"

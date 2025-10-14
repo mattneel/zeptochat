@@ -18,61 +18,17 @@ run = "zig fmt ."
 
 [tasks.test]
 description = "Run all tests"
-run = "zig build test"
+run = "zig build test --summary all"
 
 [tasks."test:opt"]
 description = "Run tests optimized"
-run = "zig build test -Doptimize=ReleaseFast"
+run = "zig build test -Doptimize=ReleaseFast --summary all"
 
 [tasks.bench]
 description = "Run benchmarks"
 run = "zig build bench -Doptimize=ReleaseFast"
 run_windows = "zig build bench -Doptimize=ReleaseFast"
 
-[tasks."bench:puffer"]
-description = "Benchmark against PufferLib (requires Python)"
-run = """
-python3 -m venv .venv
-source .venv/bin/activate
-pip install pufferlib gymnasium
-python bench/puffer_comparison/compare.py
-"""
-run_windows = """
-python -m venv .venv
-.venv\\Scripts\\activate.bat
-pip install pufferlib gymnasium
-python bench\\puffer_comparison\\compare.py
-"""
-
-[tasks.example]
-description = "Run CartPole example"
-run = "./zig-out/bin/cartpole"
-run_windows = ".\\zig-out\\bin\\cartpole.exe"
-
-[tasks."example:build"]
-description = "Build CartPole example"
-run = "zig build example"
-
-[tasks.ppo]
-description = "Run PPO training on CartPole"
-run = "zig build ppo -Doptimize=ReleaseFast"
-
-[tasks.render]
-description = "Visualize trained CartPole agent"
-run = "zig build render -Doptimize=ReleaseFast"
-
-[tasks."render:record"]
-description = "Record video of trained agent"
-run = """
-mkdir -p frames renders
-echo "Press Space in window to start recording, ESC when done"
-zig build render -Doptimize=ReleaseFast
-if [ -d frames ] && [ "$(ls -A frames)" ]; then
-  ffmpeg -y -framerate 60 -i frames/frame_%06d.png -c:v libx264 -pix_fmt yuv420p renders/cartpole_solved.mp4
-  rm -rf frames
-  echo "✅ Video saved to renders/cartpole_solved.mp4"
-fi
-"""
 
 [tasks.clean]
 description = "Clean build artifacts"
@@ -81,7 +37,7 @@ run_windows = "if exist zig-out rmdir /s /q zig-out && if exist zig-cache rmdir 
 
 [tasks.docs]
 description = "Build documentation"
-run = "mdbook build docs"
+run = "mdbook build docs --dest-dir ../zig-out/docs"
 
 [tasks."docs:serve"]
 description = "Serve docs locally"

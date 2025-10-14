@@ -35,7 +35,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const transformer_module = b.createModule(.{
+        .root_source_file = b.path("src/transformer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     test_module.addImport("tokenizer", tokenizer_module);
+    test_module.addImport("transformer", transformer_module);
 
     const tests = b.addTest(.{
         .root_module = test_module,

@@ -269,6 +269,9 @@ pub const Tokenizer = struct {
 - Start with simple BPE (no regex pre-tokenization initially)
 - Use `std.StringHashMap` for vocab lookup
 - Allocate with provided allocator, never implicit
+- Expose `init(allocator, vocab_path, merges_path)` for file-backed vocab with a convenience `initEmpty` to help tests inject tokens directly.
+- Maintain 256 byte-level base tokens; `vocabSize()` should reflect base tokens plus any learned entries.
+- Ensure byte-level fallback so UTF-8 sequences outside the vocab degrade to individual byte tokens and decode losslessly.
 
 ### 2. Transformer Architecture
 

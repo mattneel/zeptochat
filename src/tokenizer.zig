@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Error = error{
+pub const Error = error{
     InvalidToken,
     UnknownToken,
     DuplicateToken,
@@ -14,19 +14,47 @@ const Merge = struct {
 };
 
 pub const Tokenizer = struct {
+    const base_token_count = 256;
+
     allocator: std.mem.Allocator,
     token_lookup: std.StringHashMap(u32),
     token_bytes: std.AutoHashMap(u32, []u8),
     merges: std.AutoHashMap(u64, Merge),
     next_merge_rank: u32,
+    vocab_size: usize,
 
-    pub fn init(allocator: std.mem.Allocator) Error!Tokenizer {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        vocab_path: []const u8,
+        merges_path: []const u8,
+    ) Error!Tokenizer {
+        const cwd = std.fs.cwd();
+        return initFromDir(allocator, cwd, vocab_path, merges_path);
+    }
+
+    pub fn initFromDir(
+        allocator: std.mem.Allocator,
+        dir: std.fs.Dir,
+        vocab_path: []const u8,
+        merges_path: []const u8,
+    ) Error!Tokenizer {
+        var tokenizer = try Tokenizer.initEmpty(allocator);
+        errdefer tokenizer.deinit();
+
+        try tokenizer.loadVocabFromFile(dir, vocab_path);
+        try tokenizer.loadMergesFromFile(dir, merges_path);
+
+        return tokenizer;
+    }
+
+    pub fn initEmpty(allocator: std.mem.Allocator) Error!Tokenizer {
         return Tokenizer{
             .allocator = allocator,
             .token_lookup = std.StringHashMap(u32).init(allocator),
             .token_bytes = std.AutoHashMap(u32, []u8).init(allocator),
             .merges = std.AutoHashMap(u64, Merge).init(allocator),
             .next_merge_rank = 0,
+            .vocab_size = base_token_count,
         };
     }
 
@@ -40,12 +68,20 @@ pub const Tokenizer = struct {
         self.merges.deinit();
     }
 
+    pub fn vocabSize(self: *const Tokenizer) usize {
+        return self.vocab_size;
+    }
+
     fn pairKey(left: u32, right: u32) u64 {
         return (@as(u64, left) << 32) | @as(u64, right);
     }
 
     fn resolveTokenId(self: *Tokenizer, symbol: []const u8) Error!u32 {
         if (symbol.len == 0) return Error.UnknownToken;
+
+        if (self.token_lookup.get(symbol)) |id| {
+            return id;
+        }
 
         var all_digits = true;
         for (symbol) |ch| {
@@ -68,9 +104,6 @@ pub const Tokenizer = struct {
 
         if (symbol.len == 1) {
             return @as(u32, symbol[0]);
-        }
-        if (self.token_lookup.get(symbol)) |id| {
-            return id;
         }
         return Error.UnknownToken;
     }
@@ -97,6 +130,10 @@ pub const Tokenizer = struct {
             self.allocator.free(dup);
             return err;
         };
+
+        if (id >= base_token_count) {
+            self.vocab_size += 1;
+        }
     }
 
     pub fn addMerge(
@@ -135,7 +172,8 @@ pub const Tokenizer = struct {
 
             const sep = std.mem.indexOfAny(u8, trimmed, " \t") orelse return Error.InvalidFormat;
             const id_slice = trimmed[0..sep];
-            const symbol_slice = std.mem.trim(u8, trimmed[sep + 1 ..], " \t");
+            const symbol_part = trimmed[sep + 1 ..];
+            const symbol_slice = std.mem.trimRight(u8, symbol_part, " \t\r");
             if (symbol_slice.len == 0) return Error.InvalidFormat;
 
             const id = std.fmt.parseInt(u32, id_slice, 10) catch return Error.InvalidFormat;
@@ -205,20 +243,6 @@ pub const Tokenizer = struct {
         const bytes = try self.readFileAlloc(dir, path, 10 * 1024 * 1024);
         defer self.allocator.free(bytes);
         try self.loadMergesFromBytes(bytes);
-    }
-
-    pub fn initFromFiles(
-        allocator: std.mem.Allocator,
-        vocab_path: []const u8,
-        merges_path: []const u8,
-        dir: std.fs.Dir,
-    ) Error!Tokenizer {
-        var tokenizer = try Tokenizer.init(allocator);
-        errdefer tokenizer.deinit();
-
-        try tokenizer.loadVocabFromFile(dir, vocab_path);
-        try tokenizer.loadMergesFromFile(dir, merges_path);
-        return tokenizer;
     }
 
     pub fn encode(self: *Tokenizer, input: []const u8) Error![]u32 {

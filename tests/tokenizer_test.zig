@@ -4,7 +4,7 @@ const Tokenizer = @import("tokenizer").Tokenizer;
 test "tokenizer encodes ASCII fallback" {
     const allocator = std.testing.allocator;
 
-    var tokenizer = try Tokenizer.init(allocator);
+    var tokenizer = try Tokenizer.initEmpty(allocator);
     defer tokenizer.deinit();
 
     const input = "hi";
@@ -21,10 +21,31 @@ test "tokenizer encodes ASCII fallback" {
     try std.testing.expectEqualStrings(input, decoded);
 }
 
+test "tokenizer falls back to byte tokens for utf8" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.initEmpty(allocator);
+    defer tokenizer.deinit();
+
+    const input = "🤖";
+    const tokens = try tokenizer.encode(input);
+    defer allocator.free(tokens);
+
+    const expected_bytes = input;
+    try std.testing.expectEqual(@as(usize, expected_bytes.len), tokens.len);
+    for (tokens, 0..) |token, idx| {
+        try std.testing.expectEqual(@as(u32, expected_bytes[idx]), token);
+    }
+
+    const decoded = try tokenizer.decode(tokens);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings(input, decoded);
+}
+
 test "tokenizer merges simple pair" {
     const allocator = std.testing.allocator;
 
-    var tokenizer = try Tokenizer.init(allocator);
+    var tokenizer = try Tokenizer.initEmpty(allocator);
     defer tokenizer.deinit();
 
     try tokenizer.addToken("hi", 256);
@@ -48,7 +69,7 @@ test "tokenizer merges simple pair" {
 test "tokenizer prefers lowest-rank merge" {
     const allocator = std.testing.allocator;
 
-    var tokenizer = try Tokenizer.init(allocator);
+    var tokenizer = try Tokenizer.initEmpty(allocator);
     defer tokenizer.deinit();
 
     try tokenizer.addToken("ab", 300);
@@ -77,10 +98,40 @@ test "tokenizer prefers lowest-rank merge" {
     try std.testing.expectEqual(@as(u32, 'b'), tokens[2]);
 }
 
+test "tokenizer collapses cascading merges" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.initEmpty(allocator);
+    defer tokenizer.deinit();
+
+    try tokenizer.addToken("aa", 600);
+    try tokenizer.addToken("aaaa", 601);
+
+    try tokenizer.addMerge(.{
+        .left = "a",
+        .right = "a",
+        .result = "aa",
+        .rank = 0,
+    });
+
+    try tokenizer.addMerge(.{
+        .left = "aa",
+        .right = "aa",
+        .result = "aaaa",
+        .rank = 1,
+    });
+
+    const tokens = try tokenizer.encode("aaaa");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 601), tokens[0]);
+}
+
 test "tokenizer rejects merges with unknown symbols" {
     const allocator = std.testing.allocator;
 
-    var tokenizer = try Tokenizer.init(allocator);
+    var tokenizer = try Tokenizer.initEmpty(allocator);
     defer tokenizer.deinit();
 
     try tokenizer.addToken("ok", 512);
@@ -97,7 +148,7 @@ test "tokenizer rejects merges with unknown symbols" {
 test "tokenizer loads vocab and merges from buffers" {
     const allocator = std.testing.allocator;
 
-    var tokenizer = try Tokenizer.init(allocator);
+    var tokenizer = try Tokenizer.initEmpty(allocator);
     defer tokenizer.deinit();
 
     const vocab_bytes =
@@ -117,6 +168,18 @@ test "tokenizer loads vocab and merges from buffers" {
     defer allocator.free(tokens);
     try std.testing.expectEqual(@as(usize, 1), tokens.len);
     try std.testing.expectEqual(@as(u32, 256), tokens[0]);
+}
+
+test "tokenizer reports vocab size including merges" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.initEmpty(allocator);
+    defer tokenizer.deinit();
+
+    try std.testing.expectEqual(@as(usize, 256), tokenizer.vocabSize());
+
+    try tokenizer.addToken("hi", 512);
+    try std.testing.expectEqual(@as(usize, 257), tokenizer.vocabSize());
 }
 
 test "tokenizer init from files" {
@@ -147,7 +210,7 @@ test "tokenizer init from files" {
     try merges_io.print("{s}", .{merges});
     try merges_io.flush();
 
-    var tokenizer = try Tokenizer.initFromFiles(allocator, "vocab.txt", "merges.txt", tmp.dir);
+    var tokenizer = try Tokenizer.initFromDir(allocator, tmp.dir, "vocab.txt", "merges.txt");
     defer tokenizer.deinit();
 
     const tokens = try tokenizer.encode("hi");

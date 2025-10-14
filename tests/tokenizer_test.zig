@@ -69,3 +69,40 @@ test "tokenizer loads vocab and merges from buffers" {
     try std.testing.expectEqual(@as(usize, 1), tokens.len);
     try std.testing.expectEqual(@as(u32, 256), tokens[0]);
 }
+
+test "tokenizer init from files" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var vocab_file = try tmp.dir.createFile("vocab.txt", .{});
+    defer vocab_file.close();
+    var vocab_buffer: [256]u8 = undefined;
+    var vocab_writer = vocab_file.writer(&vocab_buffer);
+    const vocab_io: *std.Io.Writer = &vocab_writer.interface;
+    const vocab: []const u8 =
+        \\256 hi
+        \\104 h
+        \\105 i
+    ;
+    try vocab_io.print("{s}", .{vocab});
+    try vocab_io.flush();
+
+    var merges_file = try tmp.dir.createFile("merges.txt", .{});
+    defer merges_file.close();
+    var merges_buffer: [256]u8 = undefined;
+    var merges_writer = merges_file.writer(&merges_buffer);
+    const merges_io: *std.Io.Writer = &merges_writer.interface;
+    const merges: []const u8 = "h i hi\n";
+    try merges_io.print("{s}", .{merges});
+    try merges_io.flush();
+
+    var tokenizer = try Tokenizer.initFromFiles(allocator, "vocab.txt", "merges.txt", tmp.dir);
+    defer tokenizer.deinit();
+
+    const tokens = try tokenizer.encode("hi");
+    defer allocator.free(tokens);
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 256), tokens[0]);
+}

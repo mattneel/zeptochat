@@ -6,7 +6,7 @@ const Error = error{
     DuplicateToken,
     DuplicateMerge,
     InvalidFormat,
-} || std.mem.Allocator.Error;
+} || std.mem.Allocator.Error || std.fs.File.OpenError || std.fs.File.ReadError || std.fs.File.SeekError;
 
 const Merge = struct {
     rank: u32,
@@ -184,6 +184,41 @@ pub const Tokenizer = struct {
         if (auto_rank > self.next_merge_rank) {
             self.next_merge_rank = auto_rank;
         }
+    }
+
+    fn readFileAlloc(self: *Tokenizer, dir: std.fs.Dir, path: []const u8, max_bytes: usize) Error![]u8 {
+        return dir.readFileAlloc(self.allocator, path, max_bytes) catch |err| {
+            if (err == error.FileTooBig) {
+                return Error.InvalidFormat;
+            }
+            return err;
+        };
+    }
+
+    pub fn loadVocabFromFile(self: *Tokenizer, dir: std.fs.Dir, path: []const u8) Error!void {
+        const bytes = try self.readFileAlloc(dir, path, 10 * 1024 * 1024);
+        defer self.allocator.free(bytes);
+        try self.loadVocabFromBytes(bytes);
+    }
+
+    pub fn loadMergesFromFile(self: *Tokenizer, dir: std.fs.Dir, path: []const u8) Error!void {
+        const bytes = try self.readFileAlloc(dir, path, 10 * 1024 * 1024);
+        defer self.allocator.free(bytes);
+        try self.loadMergesFromBytes(bytes);
+    }
+
+    pub fn initFromFiles(
+        allocator: std.mem.Allocator,
+        vocab_path: []const u8,
+        merges_path: []const u8,
+        dir: std.fs.Dir,
+    ) Error!Tokenizer {
+        var tokenizer = try Tokenizer.init(allocator);
+        errdefer tokenizer.deinit();
+
+        try tokenizer.loadVocabFromFile(dir, vocab_path);
+        try tokenizer.loadMergesFromFile(dir, merges_path);
+        return tokenizer;
     }
 
     pub fn encode(self: *Tokenizer, input: []const u8) Error![]u32 {

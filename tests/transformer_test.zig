@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const Transformer = @import("transformer").Transformer;
 const TinyConfig = @import("transformer").TinyConfig;
+const LayerNorm = @import("transformer").LayerNorm;
 
 test "transformer init allocates embeddings" {
     var model = try Transformer.init(testing.allocator, TinyConfig);
@@ -39,4 +40,60 @@ test "transformer embeddings are randomized" {
     }
 
     try testing.expect(!identical);
+}
+
+test "layernorm init sets affine parameters" {
+    var ln = try LayerNorm.init(testing.allocator, 64);
+    defer ln.deinit();
+
+    for (ln.weight) |w| try testing.expectEqual(@as(f32, 1.0), w);
+    for (ln.bias) |b| try testing.expectEqual(@as(f32, 0.0), b);
+}
+
+test "layernorm normalises to zero mean unit variance" {
+    var ln = try LayerNorm.init(testing.allocator, 4);
+    defer ln.deinit();
+
+    var data = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+    ln.forward(&data);
+
+    var sum: f32 = 0;
+    for (data) |val| sum += val;
+    const mean = sum / 4.0;
+    try testing.expect(@abs(mean) < 1e-5);
+
+    var var_sum: f32 = 0;
+    for (data) |val| {
+        const diff = val - mean;
+        var_sum += diff * diff;
+    }
+    const variance = var_sum / 4.0;
+    try testing.expect(@abs(variance - 1.0) < 1e-4);
+}
+
+test "layernorm applies affine transform" {
+    var ln = try LayerNorm.init(testing.allocator, 4);
+    defer ln.deinit();
+
+    ln.weight[0] = 2.0;
+    ln.bias[0] = 3.0;
+
+    var data = [_]f32{ 1.5, 1.5, 1.5, 1.5 };
+    ln.forward(&data);
+
+    try testing.expect(!std.math.isNan(data[0]));
+    try testing.expect(!std.math.isInf(data[0]));
+}
+
+test "layernorm handles zero variance" {
+    var ln = try LayerNorm.init(testing.allocator, 4);
+    defer ln.deinit();
+
+    var data = [_]f32{ 5.0, 5.0, 5.0, 5.0 };
+    ln.forward(&data);
+
+    for (data) |val| {
+        try testing.expect(!std.math.isNan(val));
+        try testing.expect(!std.math.isInf(val));
+    }
 }

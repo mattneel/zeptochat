@@ -19,6 +19,56 @@ pub const TinyConfig = ModelConfig{
     .dropout = 0.0,
 };
 
+pub const LayerNorm = struct {
+    weight: []f32,
+    bias: []f32,
+    allocator: std.mem.Allocator,
+    eps: f32 = 1e-5,
+
+    pub fn init(allocator: std.mem.Allocator, d_model: usize) !LayerNorm {
+        const weight = try allocator.alloc(f32, d_model);
+        errdefer allocator.free(weight);
+
+        const bias = try allocator.alloc(f32, d_model);
+        errdefer allocator.free(bias);
+
+        @memset(weight, 1.0);
+        @memset(bias, 0.0);
+
+        return LayerNorm{
+            .weight = weight,
+            .bias = bias,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *LayerNorm) void {
+        self.allocator.free(self.weight);
+        self.allocator.free(self.bias);
+    }
+
+    pub fn forward(self: *const LayerNorm, x: []f32) void {
+        const n = x.len;
+        const n_f32: f32 = @floatFromInt(n);
+
+        var sum: f32 = 0;
+        for (x) |val| sum += val;
+        const mean = sum / n_f32;
+
+        var var_sum: f32 = 0;
+        for (x) |val| {
+            const diff = val - mean;
+            var_sum += diff * diff;
+        }
+        const variance = var_sum / n_f32;
+        const inv_std = 1.0 / @sqrt(variance + self.eps);
+
+        for (x, 0..) |*val, i| {
+            val.* = (val.* - mean) * inv_std * self.weight[i] + self.bias[i];
+        }
+    }
+};
+
 pub const Transformer = struct {
     config: ModelConfig,
     allocator: std.mem.Allocator,

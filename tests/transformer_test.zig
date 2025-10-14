@@ -58,7 +58,7 @@ test "layernorm normalises to zero mean unit variance" {
     defer ln.deinit();
 
     var data = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
-    ln.forward(&data);
+    try ln.forward(&data);
 
     var sum: f32 = 0;
     for (data) |val| sum += val;
@@ -82,7 +82,7 @@ test "layernorm applies affine transform" {
     ln.bias[0] = 3.0;
 
     var data = [_]f32{ 1.5, 1.5, 1.5, 1.5 };
-    ln.forward(&data);
+    try ln.forward(&data);
 
     try testing.expect(!std.math.isNan(data[0]));
     try testing.expect(!std.math.isInf(data[0]));
@@ -93,7 +93,7 @@ test "layernorm handles zero variance" {
     defer ln.deinit();
 
     var data = [_]f32{ 5.0, 5.0, 5.0, 5.0 };
-    ln.forward(&data);
+    try ln.forward(&data);
 
     for (data) |val| {
         try testing.expect(!std.math.isNan(val));

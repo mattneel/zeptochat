@@ -22,6 +22,11 @@ pub const TinyConfig = ModelConfig{
 pub const LayerNorm = struct {
     weight: []f32,
     bias: []f32,
+    grad_weight: []f32,
+    grad_bias: []f32,
+    cached_input: ?[]f32 = null,
+    cached_mean: f32 = 0,
+    cached_std: f32 = 0,
     allocator: std.mem.Allocator,
     eps: f32 = 1e-5,
 
@@ -32,12 +37,22 @@ pub const LayerNorm = struct {
         const bias = try allocator.alloc(f32, d_model);
         errdefer allocator.free(bias);
 
+        const grad_weight = try allocator.alloc(f32, d_model);
+        errdefer allocator.free(grad_weight);
+
+        const grad_bias = try allocator.alloc(f32, d_model);
+        errdefer allocator.free(grad_bias);
+
         @memset(weight, 1.0);
         @memset(bias, 0.0);
+        @memset(grad_weight, 0.0);
+        @memset(grad_bias, 0.0);
 
         return LayerNorm{
             .weight = weight,
             .bias = bias,
+            .grad_weight = grad_weight,
+            .grad_bias = grad_bias,
             .allocator = allocator,
         };
     }
@@ -45,15 +60,27 @@ pub const LayerNorm = struct {
     pub fn deinit(self: *LayerNorm) void {
         self.allocator.free(self.weight);
         self.allocator.free(self.bias);
+        self.allocator.free(self.grad_weight);
+        self.allocator.free(self.grad_bias);
+        if (self.cached_input) |buf| {
+            self.allocator.free(buf);
+        }
     }
 
-    pub fn forward(self: *const LayerNorm, x: []f32) void {
+    pub fn forward(self: *LayerNorm, x: []f32) !void {
         const n = x.len;
         const n_f32: f32 = @floatFromInt(n);
+
+        if (self.cached_input) |buf| {
+            self.allocator.free(buf);
+        }
+        self.cached_input = try self.allocator.alloc(f32, n);
+        @memcpy(self.cached_input.?, x);
 
         var sum: f32 = 0;
         for (x) |val| sum += val;
         const mean = sum / n_f32;
+        self.cached_mean = mean;
 
         var var_sum: f32 = 0;
         for (x) |val| {
@@ -61,11 +88,54 @@ pub const LayerNorm = struct {
             var_sum += diff * diff;
         }
         const variance = var_sum / n_f32;
-        const inv_std = 1.0 / @sqrt(variance + self.eps);
+        const std_dev = @sqrt(variance + self.eps);
+        self.cached_std = std_dev;
+        const inv_std = 1.0 / std_dev;
 
         for (x, 0..) |*val, i| {
             val.* = (val.* - mean) * inv_std * self.weight[i] + self.bias[i];
         }
+    }
+
+    pub fn backward(self: *LayerNorm, allocator: std.mem.Allocator, grad_output: []const f32) ![]f32 {
+        const input = self.cached_input orelse return error.ForwardNotCalled;
+        const n = grad_output.len;
+        const n_f32: f32 = @floatFromInt(n);
+
+        var x_norm = try allocator.alloc(f32, n);
+        defer allocator.free(x_norm);
+
+        for (input, 0..) |val, i| {
+            x_norm[i] = (val - self.cached_mean) / self.cached_std;
+        }
+
+        for (grad_output, 0..) |grad, i| {
+            self.grad_weight[i] += grad * x_norm[i];
+            self.grad_bias[i] += grad;
+        }
+
+        var sum_scaled: f32 = 0;
+        var sum_scaled_norm: f32 = 0;
+
+        for (grad_output, 0..) |grad, i| {
+            const scaled = grad * self.weight[i];
+            sum_scaled += scaled;
+            sum_scaled_norm += scaled * x_norm[i];
+        }
+
+        var grad_input = try allocator.alloc(f32, n);
+
+        for (grad_output, 0..) |grad, i| {
+            const scaled = grad * self.weight[i];
+            grad_input[i] = (scaled - sum_scaled / n_f32 - x_norm[i] * sum_scaled_norm / n_f32) / self.cached_std;
+        }
+
+        return grad_input;
+    }
+
+    pub fn zeroGrad(self: *LayerNorm) void {
+        @memset(self.grad_weight, 0.0);
+        @memset(self.grad_bias, 0.0);
     }
 };
 
@@ -326,7 +396,7 @@ pub const TransformerBlock = struct {
 
         for (0..seq_len) |i| {
             const offset = i * d_model;
-            self.ln1.forward(norm1[offset..][0..d_model]);
+            try self.ln1.forward(norm1[offset..][0..d_model]);
         }
 
         const attn_out = try self.attn.forward(allocator, norm1, seq_len);
@@ -344,7 +414,7 @@ pub const TransformerBlock = struct {
 
         for (0..seq_len) |i| {
             const offset = i * d_model;
-            self.ln2.forward(norm2[offset..][0..d_model]);
+            try self.ln2.forward(norm2[offset..][0..d_model]);
         }
 
         const mlp_out = try self.mlp.forward(allocator, norm2, seq_len);
@@ -554,7 +624,7 @@ pub const Transformer = struct {
 
         for (0..seq_len) |i| {
             const offset = i * d_model;
-            self.ln_final.forward(hidden[offset..][0..d_model]);
+            try self.ln_final.forward(hidden[offset..][0..d_model]);
         }
 
         const logits = try matmul(self.allocator, hidden, self.lm_head, seq_len, d_model, vocab_size);

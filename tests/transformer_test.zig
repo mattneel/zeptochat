@@ -3,6 +3,7 @@ const testing = std.testing;
 const Transformer = @import("transformer").Transformer;
 const TinyConfig = @import("transformer").TinyConfig;
 const LayerNorm = @import("transformer").LayerNorm;
+const MultiHeadAttention = @import("transformer").MultiHeadAttention;
 
 test "transformer init allocates embeddings" {
     var model = try Transformer.init(testing.allocator, TinyConfig);
@@ -96,4 +97,69 @@ test "layernorm handles zero variance" {
         try testing.expect(!std.math.isNan(val));
         try testing.expect(!std.math.isInf(val));
     }
+}
+
+test "attention init allocates projections" {
+    const d_model = 64;
+    const n_heads = 4;
+    const d_squared = d_model * d_model;
+
+    var attn = try MultiHeadAttention.init(testing.allocator, d_model, n_heads);
+    defer attn.deinit();
+
+    try testing.expectEqual(d_model, attn.d_model);
+    try testing.expectEqual(n_heads, attn.n_heads);
+    try testing.expectEqual(d_model / n_heads, attn.head_dim);
+
+    try testing.expectEqual(d_squared, attn.w_q.len);
+    try testing.expectEqual(d_squared, attn.w_k.len);
+    try testing.expectEqual(d_squared, attn.w_v.len);
+    try testing.expectEqual(d_squared, attn.w_o.len);
+}
+
+test "attention forward preserves shape" {
+    const d_model = 64;
+    const n_heads = 4;
+    const seq_len = 8;
+
+    var attn = try MultiHeadAttention.init(testing.allocator, d_model, n_heads);
+    defer attn.deinit();
+
+    const input = try testing.allocator.alloc(f32, seq_len * d_model);
+    defer testing.allocator.free(input);
+    @memset(input, 1.0);
+
+    const output = try attn.forward(testing.allocator, input, seq_len);
+    defer testing.allocator.free(output);
+
+    try testing.expectEqual(input.len, output.len);
+}
+
+test "attention applies causal mask" {
+    const d_model = 16;
+    const n_heads = 4;
+    const seq_len = 4;
+
+    var attn = try MultiHeadAttention.init(testing.allocator, d_model, n_heads);
+    defer attn.deinit();
+
+    const input = try testing.allocator.alloc(f32, seq_len * d_model);
+    defer testing.allocator.free(input);
+
+    for (input, 0..) |*val, idx| {
+        val.* = @floatFromInt(idx);
+    }
+
+    const output = try attn.forward(testing.allocator, input, seq_len);
+    defer testing.allocator.free(output);
+
+    var different = false;
+    for (input, output) |in_val, out_val| {
+        if (@abs(in_val - out_val) > 1e-6) {
+            different = true;
+            break;
+        }
+    }
+
+    try testing.expect(different);
 }

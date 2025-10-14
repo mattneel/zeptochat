@@ -5,6 +5,7 @@ const TinyConfig = @import("transformer").TinyConfig;
 const LayerNorm = @import("transformer").LayerNorm;
 const MultiHeadAttention = @import("transformer").MultiHeadAttention;
 const MLP = @import("transformer").MLP;
+const TransformerBlock = @import("transformer").TransformerBlock;
 
 test "transformer init allocates embeddings" {
     var model = try Transformer.init(testing.allocator, TinyConfig);
@@ -19,10 +20,10 @@ test "transformer forward returns correct shape" {
     defer model.deinit();
 
     const tokens = [_]u32{ 1, 2, 3, 4 };
-    const hidden = try model.forward(&tokens);
-    defer testing.allocator.free(hidden);
+    const logits = try model.forward(&tokens);
+    defer testing.allocator.free(logits);
 
-    try testing.expectEqual(tokens.len * TinyConfig.d_model, hidden.len);
+    try testing.expectEqual(tokens.len * TinyConfig.vocab_size, logits.len);
 }
 
 test "transformer embeddings are randomized" {
@@ -235,4 +236,73 @@ test "gelu sanity" {
     try testing.expect(@abs(data[1] - 0.84) < 0.05);
     try testing.expect(data[2] < 0);
     try testing.expect(data[3] > data[1]);
+}
+
+test "transformer block forward" {
+    const d_model = 64;
+    const n_heads = 4;
+    const seq_len = 4;
+
+    var block = try TransformerBlock.init(testing.allocator, d_model, n_heads);
+    defer block.deinit();
+
+    const input = try testing.allocator.alloc(f32, seq_len * d_model);
+    defer testing.allocator.free(input);
+
+    for (input, 0..) |*val, idx| {
+        val.* = @as(f32, @floatFromInt(idx % 5)) / 5.0;
+    }
+
+    const output = try block.forward(testing.allocator, input, seq_len, d_model);
+    defer testing.allocator.free(output);
+
+    try testing.expectEqual(input.len, output.len);
+
+    var different = false;
+    for (input, output) |a, b| {
+        if (@abs(a - b) > 1e-5) {
+            different = true;
+            break;
+        }
+    }
+    try testing.expect(different);
+}
+
+test "transformer full forward produces logits" {
+    var model = try Transformer.init(testing.allocator, TinyConfig);
+    defer model.deinit();
+
+    const tokens = [_]u32{ 1, 2, 3, 4 };
+    const logits = try model.forward(&tokens);
+    defer testing.allocator.free(logits);
+
+    try testing.expectEqual(tokens.len * TinyConfig.vocab_size, logits.len);
+
+    for (logits) |val| {
+        try testing.expect(!std.math.isNan(val));
+        try testing.expect(!std.math.isInf(val));
+        try testing.expect(@abs(val) < 100.0);
+    }
+}
+
+test "transformer logits differ for different inputs" {
+    var model = try Transformer.init(testing.allocator, TinyConfig);
+    defer model.deinit();
+
+    const tokens_a = [_]u32{ 1, 2, 3, 4 };
+    const logits_a = try model.forward(&tokens_a);
+    defer testing.allocator.free(logits_a);
+
+    const tokens_b = [_]u32{ 5, 6, 7, 8 };
+    const logits_b = try model.forward(&tokens_b);
+    defer testing.allocator.free(logits_b);
+
+    var different = false;
+    for (logits_a, logits_b) |a, b| {
+        if (@abs(a - b) > 1e-5) {
+            different = true;
+            break;
+        }
+    }
+    try testing.expect(different);
 }

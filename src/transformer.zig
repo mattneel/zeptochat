@@ -279,6 +279,86 @@ pub const MLP = struct {
     }
 };
 
+pub const TransformerBlock = struct {
+    ln1: LayerNorm,
+    attn: MultiHeadAttention,
+    ln2: LayerNorm,
+    mlp: MLP,
+
+    pub fn init(allocator: std.mem.Allocator, d_model: usize, n_heads: usize) !TransformerBlock {
+        var ln1 = try LayerNorm.init(allocator, d_model);
+        errdefer ln1.deinit();
+
+        var attn = try MultiHeadAttention.init(allocator, d_model, n_heads);
+        errdefer attn.deinit();
+
+        var ln2 = try LayerNorm.init(allocator, d_model);
+        errdefer ln2.deinit();
+
+        var mlp = try MLP.init(allocator, d_model);
+        errdefer mlp.deinit();
+
+        return TransformerBlock{
+            .ln1 = ln1,
+            .attn = attn,
+            .ln2 = ln2,
+            .mlp = mlp,
+        };
+    }
+
+    pub fn deinit(self: *TransformerBlock) void {
+        self.ln1.deinit();
+        self.attn.deinit();
+        self.ln2.deinit();
+        self.mlp.deinit();
+    }
+
+    pub fn forward(
+        self: *TransformerBlock,
+        allocator: std.mem.Allocator,
+        x: []const f32,
+        seq_len: usize,
+        d_model: usize,
+    ) ![]f32 {
+        var norm1 = try allocator.alloc(f32, x.len);
+        defer allocator.free(norm1);
+        @memcpy(norm1, x);
+
+        for (0..seq_len) |i| {
+            const offset = i * d_model;
+            self.ln1.forward(norm1[offset..][0..d_model]);
+        }
+
+        const attn_out = try self.attn.forward(allocator, norm1, seq_len);
+        defer allocator.free(attn_out);
+
+        var residual = try allocator.alloc(f32, x.len);
+        defer allocator.free(residual);
+        for (0..x.len) |i| {
+            residual[i] = x[i] + attn_out[i];
+        }
+
+        var norm2 = try allocator.alloc(f32, residual.len);
+        defer allocator.free(norm2);
+        @memcpy(norm2, residual);
+
+        for (0..seq_len) |i| {
+            const offset = i * d_model;
+            self.ln2.forward(norm2[offset..][0..d_model]);
+        }
+
+        const mlp_out = try self.mlp.forward(allocator, norm2, seq_len);
+        defer allocator.free(mlp_out);
+
+        const output = try allocator.alloc(f32, residual.len);
+        for (0..residual.len) |i| {
+            output[i] = residual[i] + mlp_out[i];
+        }
+
+        return output;
+    }
+};
+
 fn scaledDotProductAttention(
     allocator: std.mem.Allocator,
     q: []const f32,
@@ -382,6 +462,9 @@ pub const Transformer = struct {
     allocator: std.mem.Allocator,
     token_embeddings: []f32,
     position_embeddings: []f32,
+    layers: []TransformerBlock,
+    ln_final: LayerNorm,
+    lm_head: []f32,
 
     pub fn init(allocator: std.mem.Allocator, config: ModelConfig) !Transformer {
         const token_embeddings = try allocator.alloc(f32, config.vocab_size * config.d_model);
@@ -402,24 +485,53 @@ pub const Transformer = struct {
             val.* = (random.float(f32) * 2.0 - 1.0) * scale;
         }
 
+        const layers = try allocator.alloc(TransformerBlock, config.n_layers);
+        errdefer allocator.free(layers);
+
+        for (0..config.n_layers) |i| {
+            layers[i] = try TransformerBlock.init(allocator, config.d_model, config.n_heads);
+            errdefer {
+                for (0..i) |j| layers[j].deinit();
+            }
+        }
+
+        var ln_final = try LayerNorm.init(allocator, config.d_model);
+        errdefer ln_final.deinit();
+
+        const lm_head = try allocator.alloc(f32, config.d_model * config.vocab_size);
+        errdefer allocator.free(lm_head);
+
+        const head_scale = @sqrt(1.0 / @as(f32, @floatFromInt(config.d_model)));
+        for (lm_head) |*val| {
+            val.* = (random.float(f32) * 2.0 - 1.0) * head_scale;
+        }
+
         return Transformer{
             .config = config,
             .allocator = allocator,
             .token_embeddings = token_embeddings,
             .position_embeddings = position_embeddings,
+            .layers = layers,
+            .ln_final = ln_final,
+            .lm_head = lm_head,
         };
     }
 
     pub fn deinit(self: *Transformer) void {
         self.allocator.free(self.token_embeddings);
         self.allocator.free(self.position_embeddings);
+        for (self.layers) |*layer| layer.deinit();
+        self.allocator.free(self.layers);
+        self.ln_final.deinit();
+        self.allocator.free(self.lm_head);
     }
 
     pub fn forward(self: *Transformer, tokens: []const u32) ![]f32 {
-        const batch_size = tokens.len;
+        const seq_len = tokens.len;
         const d_model = self.config.d_model;
+        const vocab_size = self.config.vocab_size;
 
-        var hidden = try self.allocator.alloc(f32, batch_size * d_model);
+        var hidden = try self.allocator.alloc(f32, seq_len * d_model);
         errdefer self.allocator.free(hidden);
 
         for (tokens, 0..) |token, pos| {
@@ -434,6 +546,19 @@ pub const Transformer = struct {
             }
         }
 
-        return hidden;
+        for (self.layers) |*layer| {
+            const new_hidden = try layer.forward(self.allocator, hidden, seq_len, d_model);
+            self.allocator.free(hidden);
+            hidden = new_hidden;
+        }
+
+        for (0..seq_len) |i| {
+            const offset = i * d_model;
+            self.ln_final.forward(hidden[offset..][0..d_model]);
+        }
+
+        const logits = try matmul(self.allocator, hidden, self.lm_head, seq_len, d_model, vocab_size);
+        self.allocator.free(hidden);
+        return logits;
     }
 };

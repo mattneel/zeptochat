@@ -272,6 +272,14 @@ pub const MLP = struct {
     b1: []f32,
     w2: []f32,
     b2: []f32,
+    grad_w1: []f32,
+    grad_b1: []f32,
+    grad_w2: []f32,
+    grad_b2: []f32,
+    cached_input: ?[]f32 = null,
+    cached_pre: ?[]f32 = null,
+    cached_hidden: ?[]f32 = null,
+    seq_len: usize = 0,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, d_model: usize) !MLP {
@@ -289,6 +297,18 @@ pub const MLP = struct {
         const b2 = try allocator.alloc(f32, d_model);
         errdefer allocator.free(b2);
 
+        const grad_w1 = try allocator.alloc(f32, d_model * d_ff);
+        errdefer allocator.free(grad_w1);
+
+        const grad_b1 = try allocator.alloc(f32, d_ff);
+        errdefer allocator.free(grad_b1);
+
+        const grad_w2 = try allocator.alloc(f32, d_ff * d_model);
+        errdefer allocator.free(grad_w2);
+
+        const grad_b2 = try allocator.alloc(f32, d_model);
+        errdefer allocator.free(grad_b2);
+
         var prng = std.Random.DefaultPrng.init(2024);
         const random = prng.random();
         const scale1 = @sqrt(1.0 / @as(f32, @floatFromInt(d_model)));
@@ -299,6 +319,10 @@ pub const MLP = struct {
 
         @memset(b1, 0.0);
         @memset(b2, 0.0);
+        @memset(grad_w1, 0.0);
+        @memset(grad_b1, 0.0);
+        @memset(grad_w2, 0.0);
+        @memset(grad_b2, 0.0);
 
         return MLP{
             .d_model = d_model,
@@ -307,6 +331,10 @@ pub const MLP = struct {
             .b1 = b1,
             .w2 = w2,
             .b2 = b2,
+            .grad_w1 = grad_w1,
+            .grad_b1 = grad_b1,
+            .grad_w2 = grad_w2,
+            .grad_b2 = grad_b2,
             .allocator = allocator,
         };
     }
@@ -316,27 +344,48 @@ pub const MLP = struct {
         self.allocator.free(self.b1);
         self.allocator.free(self.w2);
         self.allocator.free(self.b2);
+        self.allocator.free(self.grad_w1);
+        self.allocator.free(self.grad_b1);
+        self.allocator.free(self.grad_w2);
+        self.allocator.free(self.grad_b2);
+        if (self.cached_input) |buf| self.allocator.free(buf);
+        if (self.cached_pre) |buf| self.allocator.free(buf);
+        if (self.cached_hidden) |buf| self.allocator.free(buf);
     }
 
     pub fn forward(
-        self: *const MLP,
+        self: *MLP,
         allocator: std.mem.Allocator,
         x: []const f32,
         seq_len: usize,
     ) ![]f32 {
-        var hidden = try matmul(allocator, x, self.w1, seq_len, self.d_model, self.d_ff);
-        defer allocator.free(hidden);
+        self.seq_len = seq_len;
+
+        if (self.cached_input) |buf| allocator.free(buf);
+        self.cached_input = try allocator.alloc(f32, x.len);
+        @memcpy(self.cached_input.?, x);
+
+        var pre = try matmul(allocator, x, self.w1, seq_len, self.d_model, self.d_ff);
+        defer allocator.free(pre);
 
         for (0..seq_len) |i| {
             const offset = i * self.d_ff;
             for (0..self.d_ff) |j| {
-                hidden[offset + j] += self.b1[j];
+                pre[offset + j] += self.b1[j];
             }
         }
 
-        gelu(hidden);
+        if (self.cached_pre) |buf| allocator.free(buf);
+        self.cached_pre = try allocator.alloc(f32, pre.len);
+        @memcpy(self.cached_pre.?, pre);
 
-        var output = try matmul(allocator, hidden, self.w2, seq_len, self.d_ff, self.d_model);
+        gelu(pre);
+
+        if (self.cached_hidden) |buf| allocator.free(buf);
+        self.cached_hidden = try allocator.alloc(f32, pre.len);
+        @memcpy(self.cached_hidden.?, pre);
+
+        var output = try matmul(allocator, pre, self.w2, seq_len, self.d_ff, self.d_model);
 
         for (0..seq_len) |i| {
             const offset = i * self.d_model;
@@ -346,6 +395,85 @@ pub const MLP = struct {
         }
 
         return output;
+    }
+
+    pub fn backward(
+        self: *MLP,
+        allocator: std.mem.Allocator,
+        grad_output: []const f32,
+    ) ![]f32 {
+        const seq_len = self.seq_len;
+        const input = self.cached_input orelse return error.ForwardNotCalled;
+        const pre = self.cached_pre orelse return error.ForwardNotCalled;
+        const hidden = self.cached_hidden orelse return error.ForwardNotCalled;
+
+        for (0..seq_len) |i| {
+            const offset = i * self.d_model;
+            for (0..self.d_model) |j| {
+                self.grad_b2[j] += grad_output[offset + j];
+            }
+        }
+
+        for (0..seq_len) |i| {
+            for (0..self.d_ff) |j| {
+                for (0..self.d_model) |k| {
+                    self.grad_w2[j * self.d_model + k] +=
+                        hidden[i * self.d_ff + j] * grad_output[i * self.d_model + k];
+                }
+            }
+        }
+
+        var grad_hidden = try allocator.alloc(f32, seq_len * self.d_ff);
+        defer allocator.free(grad_hidden);
+
+        for (0..seq_len) |i| {
+            for (0..self.d_ff) |j| {
+                var sum: f32 = 0;
+                for (0..self.d_model) |k| {
+                    sum += grad_output[i * self.d_model + k] * self.w2[j * self.d_model + k];
+                }
+                grad_hidden[i * self.d_ff + j] = sum;
+            }
+        }
+
+        geluBackward(grad_hidden, pre);
+
+        for (0..seq_len) |i| {
+            const offset = i * self.d_ff;
+            for (0..self.d_ff) |j| {
+                self.grad_b1[j] += grad_hidden[offset + j];
+            }
+        }
+
+        for (0..seq_len) |i| {
+            for (0..self.d_model) |j| {
+                for (0..self.d_ff) |k| {
+                    self.grad_w1[j * self.d_ff + k] +=
+                        input[i * self.d_model + j] * grad_hidden[i * self.d_ff + k];
+                }
+            }
+        }
+
+        var grad_input = try allocator.alloc(f32, seq_len * self.d_model);
+
+        for (0..seq_len) |i| {
+            for (0..self.d_model) |j| {
+                var sum: f32 = 0;
+                for (0..self.d_ff) |k| {
+                    sum += grad_hidden[i * self.d_ff + k] * self.w1[j * self.d_ff + k];
+                }
+                grad_input[i * self.d_model + j] = sum;
+            }
+        }
+
+        return grad_input;
+    }
+
+    pub fn zeroGrad(self: *MLP) void {
+        @memset(self.grad_w1, 0.0);
+        @memset(self.grad_b1, 0.0);
+        @memset(self.grad_w2, 0.0);
+        @memset(self.grad_b2, 0.0);
     }
 };
 
@@ -524,6 +652,23 @@ pub fn gelu(x: []f32) void {
         const inner = sqrt_2_over_pi * (x_val + 0.044715 * x_cubed);
         const cdf = 0.5 * (1.0 + std.math.tanh(inner));
         val.* = x_val * cdf;
+    }
+}
+
+fn geluBackward(grad: []f32, x: []const f32) void {
+    const sqrt_2_over_pi = @sqrt(2.0 / std.math.pi);
+
+    for (grad, x) |*g, x_val| {
+        const x_cubed = x_val * x_val * x_val;
+        const inner = sqrt_2_over_pi * (x_val + 0.044715 * x_cubed);
+        const tanh_inner = std.math.tanh(inner);
+        const cdf = 0.5 * (1.0 + tanh_inner);
+
+        const sech_sq = 1.0 - tanh_inner * tanh_inner;
+        const d_inner = sqrt_2_over_pi * (1.0 + 3.0 * 0.044715 * x_val * x_val);
+        const gelu_grad = cdf + x_val * 0.5 * sech_sq * d_inner;
+
+        g.* *= gelu_grad;
     }
 }
 

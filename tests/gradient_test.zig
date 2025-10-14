@@ -56,3 +56,56 @@ test "layernorm gradient check weight" {
 
     try testing.expect(relative_error < 1e-3);
 }
+
+test "mlp gradient check weight" {
+    const d_model = 8;
+    const seq_len = 2;
+
+    var mlp = try @import("transformer").MLP.init(testing.allocator, d_model);
+    defer mlp.deinit();
+
+    const input = try testing.allocator.alloc(f32, seq_len * d_model);
+    defer testing.allocator.free(input);
+
+    for (input, 0..) |*val, idx| {
+        val.* = @as(f32, @floatFromInt(idx)) / 10.0;
+    }
+
+    const output = try mlp.forward(testing.allocator, input, seq_len);
+    defer testing.allocator.free(output);
+
+    mlp.zeroGrad();
+
+    const grad_output = try testing.allocator.alloc(f32, output.len);
+    defer testing.allocator.free(grad_output);
+    @memset(grad_output, 1.0);
+
+    const grad_input = try mlp.backward(testing.allocator, grad_output);
+    defer testing.allocator.free(grad_input);
+
+    const eps: f32 = 1e-4;
+    const param = &mlp.w1[0];
+    const original = param.*;
+
+    param.* = original + eps;
+    const out_plus = try mlp.forward(testing.allocator, input, seq_len);
+    defer testing.allocator.free(out_plus);
+    var loss_plus: f32 = 0;
+    for (out_plus) |val| loss_plus += val;
+
+    param.* = original - eps;
+    const out_minus = try mlp.forward(testing.allocator, input, seq_len);
+    defer testing.allocator.free(out_minus);
+    var loss_minus: f32 = 0;
+    for (out_minus) |val| loss_minus += val;
+
+    param.* = original;
+
+    const numerical = (loss_plus - loss_minus) / (2.0 * eps);
+    const analytical = mlp.grad_w1[0];
+
+    const diff = @abs(numerical - analytical);
+    const relative_error = diff / (@abs(numerical) + @abs(analytical) + 1e-8);
+
+    try testing.expect(relative_error < 1e-2);
+}

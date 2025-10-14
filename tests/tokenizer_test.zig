@@ -44,3 +44,28 @@ test "tokenizer merges simple pair" {
     defer allocator.free(decoded);
     try std.testing.expectEqualStrings("hi", decoded);
 }
+
+test "tokenizer loads vocab and merges from buffers" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.init(allocator);
+    defer tokenizer.deinit();
+
+    const vocab_bytes =
+        \\256 hi
+        \\104 h
+        \\105 i
+    ;
+
+    const merge_bytes =
+        \\h i hi
+    ;
+
+    try tokenizer.loadVocabFromBytes(vocab_bytes);
+    try tokenizer.loadMergesFromBytes(merge_bytes);
+
+    const tokens = try tokenizer.encode("hi");
+    defer allocator.free(tokens);
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(u32, 256), tokens[0]);
+}

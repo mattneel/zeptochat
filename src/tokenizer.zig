@@ -5,6 +5,7 @@ const Error = error{
     UnknownToken,
     DuplicateToken,
     DuplicateMerge,
+    InvalidFormat,
 } || std.mem.Allocator.Error;
 
 const Merge = struct {
@@ -17,6 +18,7 @@ pub const Tokenizer = struct {
     token_lookup: std.StringHashMap(u32),
     token_bytes: std.AutoHashMap(u32, []u8),
     merges: std.AutoHashMap(u64, Merge),
+    next_merge_rank: u32,
 
     pub fn init(allocator: std.mem.Allocator) Error!Tokenizer {
         return Tokenizer{
@@ -24,6 +26,7 @@ pub const Tokenizer = struct {
             .token_lookup = std.StringHashMap(u32).init(allocator),
             .token_bytes = std.AutoHashMap(u32, []u8).init(allocator),
             .merges = std.AutoHashMap(u64, Merge).init(allocator),
+            .next_merge_rank = 0,
         };
     }
 
@@ -43,6 +46,26 @@ pub const Tokenizer = struct {
 
     fn resolveTokenId(self: *Tokenizer, symbol: []const u8) Error!u32 {
         if (symbol.len == 0) return Error.UnknownToken;
+
+        var all_digits = true;
+        for (symbol) |ch| {
+            if (!std.ascii.isDigit(ch)) {
+                all_digits = false;
+                break;
+            }
+        }
+
+        if (all_digits) {
+            const id = std.fmt.parseInt(u32, symbol, 10) catch return Error.UnknownToken;
+            if (id <= std.math.maxInt(u8)) {
+                return id;
+            }
+            if (self.token_bytes.contains(id)) {
+                return id;
+            }
+            return Error.UnknownToken;
+        }
+
         if (symbol.len == 1) {
             return @as(u32, symbol[0]);
         }
@@ -98,6 +121,69 @@ pub const Tokenizer = struct {
             .rank = params.rank,
             .result_id = result_id,
         });
+        if (params.rank >= self.next_merge_rank) {
+            self.next_merge_rank = params.rank + 1;
+        }
+    }
+
+    pub fn loadVocabFromBytes(self: *Tokenizer, bytes: []const u8) Error!void {
+        var line_it = std.mem.splitScalar(u8, bytes, '\n');
+        while (line_it.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0) continue;
+            if (trimmed[0] == '#') continue;
+
+            const sep = std.mem.indexOfAny(u8, trimmed, " \t") orelse return Error.InvalidFormat;
+            const id_slice = trimmed[0..sep];
+            const symbol_slice = std.mem.trim(u8, trimmed[sep + 1 ..], " \t");
+            if (symbol_slice.len == 0) return Error.InvalidFormat;
+
+            const id = std.fmt.parseInt(u32, id_slice, 10) catch return Error.InvalidFormat;
+            try self.addToken(symbol_slice, id);
+        }
+    }
+
+    pub fn loadMergesFromBytes(self: *Tokenizer, bytes: []const u8) Error!void {
+        var auto_rank = self.next_merge_rank;
+        var line_it = std.mem.splitScalar(u8, bytes, '\n');
+        while (line_it.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0) continue;
+            if (trimmed[0] == '#') continue;
+
+            var parts: [4][]const u8 = undefined;
+            var count: usize = 0;
+
+            var token_it = std.mem.tokenizeAny(u8, trimmed, " \t");
+            while (token_it.next()) |part| {
+                if (count == parts.len) break;
+                parts[count] = part;
+                count += 1;
+            }
+
+            if (count < 3) {
+                return Error.InvalidFormat;
+            }
+
+            var rank: u32 = undefined;
+            if (count >= 4) {
+                rank = std.fmt.parseInt(u32, parts[3], 10) catch return Error.InvalidFormat;
+            } else {
+                rank = auto_rank;
+                auto_rank += 1;
+            }
+
+            try self.addMerge(.{
+                .left = parts[0],
+                .right = parts[1],
+                .result = parts[2],
+                .rank = rank,
+            });
+        }
+
+        if (auto_rank > self.next_merge_rank) {
+            self.next_merge_rank = auto_rank;
+        }
     }
 
     pub fn encode(self: *Tokenizer, input: []const u8) Error![]u32 {

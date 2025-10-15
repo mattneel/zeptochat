@@ -35,14 +35,19 @@ The CLI now orchestrates tokenization, training, and generation:
 # Optional synthetic dataset for smoke testing
 zig build create-toy-data -- data/train.tokens 1000
 
-# Tokenize a corpus using a GPT-2 style vocab directory
-zig build run -- tokenize data/raw.txt data/train.tokens tests/fixtures/gpt2_mini/
+# TinyStories pipeline (ReleaseFast CLI)
+curl -L -o data/tinystories.txt \
+  https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt
+head -n 50000 data/tinystories.txt > data/tinystories_50k.txt
 
-# Train with TinyConfig (epochs, seq_len, lr, save_every, checkpoint_dir)
-zig build run -- train data/train.tokens 5 64 0.0005 1 checkpoints
+# Tokenize TinyStories using the bundled GPT-2 mini vocab
+mise run tokenize -- data/tinystories_50k.txt data/tinystories_50k.tokens tests/fixtures/gpt2_mini/
 
-# Generate text from a saved checkpoint
-zig build run -- generate checkpoints/model_epoch5.ckpt tests/fixtures/gpt2_mini/ "Once upon a time" 200 0.8
+# Train TinyConfig model; checkpoints will appear in ./checkpoints/
+mise run train -- data/tinystories_50k.tokens 10 64 0.0005 1 checkpoints
+
+# Generate text from the final checkpoint
+mise run generate -- checkpoints/model_epoch10.ckpt tests/fixtures/gpt2_mini/ "Once upon a time" 200 0.8
 ```
 
 Token files are raw little-endian `u32` streams produced by the tokenizer command. Checkpoints are stored in little-endian binary format via `src/checkpoint.zig` and include the model config and parameters.

@@ -24,6 +24,30 @@ run = "zig build test --summary all"
 description = "Run tests optimized"
 run = "zig build test --summary all -Doptimize=ReleaseFast"
 
+[tasks.tokenize]
+description = "Tokenize text with Zeptochat CLI (ReleaseFast)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+zig build -Doptimize=ReleaseFast run -- tokenize "$@"
+"""
+
+[tasks.train]
+description = "Train TinyConfig model (ReleaseFast)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+zig build -Doptimize=ReleaseFast run -- train "$@"
+"""
+
+[tasks.generate]
+description = "Generate text from checkpoint (ReleaseFast)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+zig build -Doptimize=ReleaseFast run -- generate "$@"
+"""
+
 [tasks.bench]
 description = "Run benchmarks"
 run = "zig build bench -Doptimize=ReleaseFast"

@@ -58,11 +58,43 @@ pub fn build(b: *std.Build) void {
     });
     training_module.addImport("transformer", transformer_module);
 
+    const checkpoint_module = b.createModule(.{
+        .root_source_file = b.path("src/checkpoint.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    checkpoint_module.addImport("transformer", transformer_module);
+
+    const generation_module = b.createModule(.{
+        .root_source_file = b.path("src/generation.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    generation_module.addImport("transformer", transformer_module);
+    generation_module.addImport("training", training_module);
+
+    const train_runner_module = b.createModule(.{
+        .root_source_file = b.path("src/train_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    train_runner_module.addImport("transformer", transformer_module);
+    train_runner_module.addImport("dataset", dataset_module);
+    train_runner_module.addImport("optimizer", optimizer_module);
+    train_runner_module.addImport("training", training_module);
+    train_runner_module.addImport("checkpoint", checkpoint_module);
+
+    root_module.addImport("tokenizer", tokenizer_module);
+    root_module.addImport("train_runner", train_runner_module);
+    root_module.addImport("checkpoint", checkpoint_module);
+    root_module.addImport("generation", generation_module);
+
     test_module.addImport("tokenizer", tokenizer_module);
     test_module.addImport("transformer", transformer_module);
     test_module.addImport("dataset", dataset_module);
     test_module.addImport("optimizer", optimizer_module);
     test_module.addImport("training", training_module);
+    test_module.addImport("checkpoint", checkpoint_module);
 
     const tests = b.addTest(.{
         .root_module = test_module,
@@ -90,26 +122,6 @@ pub fn build(b: *std.Build) void {
     const run_bench = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_bench.step);
-
-    const train_module = b.createModule(.{
-        .root_source_file = b.path("examples/train.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    train_module.addImport("transformer", transformer_module);
-    train_module.addImport("dataset", dataset_module);
-    train_module.addImport("optimizer", optimizer_module);
-    train_module.addImport("training", training_module);
-
-    const train_exe = b.addExecutable(.{
-        .name = "train",
-        .root_module = train_module,
-    });
-    b.installArtifact(train_exe);
-
-    const run_train = b.addRunArtifact(train_exe);
-    const train_step = b.step("train", "Run training loop");
-    train_step.dependOn(&run_train.step);
 
     const create_toy_module = b.createModule(.{
         .root_source_file = b.path("tools/create_toy_data.zig"),

@@ -29,14 +29,23 @@ zig build test --summary all -Doptimize=ReleaseFast
 
 ### Real training (experimental)
 
-The `train` example exercises dataset streaming and the AdamW optimizer against a binary token file:
+The CLI now orchestrates tokenization, training, and generation:
 
 ```bash
-zig build create-toy-data -- data/train.tokens 1000  # optional helper
-zig build train -- data/train.tokens 3 64 0.001
+# Optional synthetic dataset for smoke testing
+zig build create-toy-data -- data/train.tokens 1000
+
+# Tokenize a corpus using a GPT-2 style vocab directory
+zig build run -- tokenize data/raw.txt data/train.tokens tests/fixtures/gpt2_mini/
+
+# Train with TinyConfig (epochs, seq_len, lr, save_every, checkpoint_dir)
+zig build run -- train data/train.tokens 5 64 0.0005 1 checkpoints
+
+# Generate text from a saved checkpoint
+zig build run -- generate checkpoints/model_epoch5.ckpt tests/fixtures/gpt2_mini/ "Once upon a time" 200 0.8
 ```
 
-Arguments correspond to `<tokens-path> <epochs> <seq-len> <learning-rate>`; `seq-len` currently drives a single-sequence batch (`batch_size = 1`). Token files are raw little-endian `u32` streams produced by the tokenizer (e.g., export your corpus, encode with `Tokenizer`, and write `std.mem.bytesAsSlice(u32, …)` to disk).
+Token files are raw little-endian `u32` streams produced by the tokenizer command. Checkpoints are stored in little-endian binary format via `src/checkpoint.zig` and include the model config and parameters.
 
 ## Project Structure
 

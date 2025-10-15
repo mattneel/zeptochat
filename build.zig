@@ -90,4 +90,43 @@ pub fn build(b: *std.Build) void {
     const run_bench = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_bench.step);
+
+    const train_module = b.createModule(.{
+        .root_source_file = b.path("examples/train.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    train_module.addImport("transformer", transformer_module);
+    train_module.addImport("dataset", dataset_module);
+    train_module.addImport("optimizer", optimizer_module);
+    train_module.addImport("training", training_module);
+
+    const train_exe = b.addExecutable(.{
+        .name = "train",
+        .root_module = train_module,
+    });
+    b.installArtifact(train_exe);
+
+    const run_train = b.addRunArtifact(train_exe);
+    const train_step = b.step("train", "Run training loop");
+    train_step.dependOn(&run_train.step);
+
+    const create_toy_module = b.createModule(.{
+        .root_source_file = b.path("tools/create_toy_data.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const create_toy_exe = b.addExecutable(.{
+        .name = "create-toy-data",
+        .root_module = create_toy_module,
+    });
+    b.installArtifact(create_toy_exe);
+
+    const run_create_toy = b.addRunArtifact(create_toy_exe);
+    if (b.args) |args| {
+        run_create_toy.addArgs(args);
+    }
+    const create_toy_step = b.step("create-toy-data", "Generate synthetic token data");
+    create_toy_step.dependOn(&run_create_toy.step);
 }

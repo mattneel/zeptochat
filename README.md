@@ -27,6 +27,17 @@ To inspect the optimizer in ReleaseFast mode:
 zig build test --summary all -Doptimize=ReleaseFast
 ```
 
+### Real training (experimental)
+
+The `train` example exercises dataset streaming and the AdamW optimizer against a binary token file:
+
+```bash
+zig build create-toy-data -- data/train.tokens 1000  # optional helper
+zig build train -- data/train.tokens 3 64 0.001
+```
+
+Arguments correspond to `<tokens-path> <epochs> <seq-len> <learning-rate>`; `seq-len` currently drives a single-sequence batch (`batch_size = 1`). Token files are raw little-endian `u32` streams produced by the tokenizer (e.g., export your corpus, encode with `Tokenizer`, and write `std.mem.bytesAsSlice(u32, …)` to disk).
+
 ## Project Structure
 
 The expected layout (refer to `SPEC.md` for details):

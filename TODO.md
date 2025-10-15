@@ -25,13 +25,13 @@
   - [x] Manual gradient computation  
   - [x] Backward pass implementation  
   - [x] Tests: gradient checking
-- [ ] Optimizer (AdamW)  
-  - [ ] Weight decay  
-  - [ ] Parameter updates  
-  - [ ] Tests: convergence on quadratic
+- [x] Optimizer (AdamW)  
+  - [x] Weight decay  
+  - [x] Parameter updates  
+  - [x] Tests: convergence sanity
 - [ ] Training Loop  
-  - [ ] Data loading (0.15.1 Reader API)  
-  - [ ] Batch iteration  
+  - [x] Data loading (0.15.1 Reader API)  
+  - [x] Batch iteration  
   - [x] Forward/backward/update loop  
   - [x] Loss calculation  
   - [ ] Logging (buffered Writer API)  

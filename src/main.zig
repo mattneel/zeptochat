@@ -3,6 +3,7 @@ const Tokenizer = @import("tokenizer").Tokenizer;
 const train_runner = @import("train_runner");
 const checkpoint = @import("checkpoint");
 const generation = @import("generation");
+const transformer = @import("transformer");
 
 const TrainConfig = train_runner.TrainConfig;
 const CliError = error{ InvalidArgs, InvalidInteger, InvalidFloat };
@@ -38,7 +39,7 @@ fn printUsage(exe: []const u8) !void {
     std.debug.print("Usage: {s} <command> [args]\n", .{exe});
     std.debug.print("  tokenize <input.txt> <output.tokens> <tokenizer_dir>\n", .{});
     std.debug.print(
-        "  train <tokens_file> [epochs] [seq_len] [learning_rate] [save_every] [checkpoint_dir]\n",
+        "  train <tokens_file> [epochs] [seq_len] [learning_rate] [save_every] [checkpoint_dir] [batch_size]\n",
         .{},
     );
     std.debug.print("  generate <checkpoint> <tokenizer_dir> <prompt> [max_tokens] [temperature]\n", .{});
@@ -85,16 +86,23 @@ fn trainCommand(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !v
     };
 
     const epochs = try parseOptionalInt(args.next(), 3);
-    const seq_len = try parseOptionalInt(args.next(), 64);
+    const seq_len = try parseOptionalInt(args.next(), transformer.TinyConfig.context_length);
     const lr = try parseOptionalFloat(args.next(), 0.001);
     const save_every = try parseOptionalInt(args.next(), 1);
     const checkpoint_dir = args.next() orelse "checkpoints";
+    const batch_size = try parseOptionalInt(args.next(), 1);
+
+    if (args.next()) |extra| {
+        std.debug.print("Unexpected argument: {s}\n", .{extra});
+        return CliError.InvalidArgs;
+    }
 
     const config = TrainConfig{
         .tokens_path = tokens_path,
         .epochs = epochs,
         .seq_len = seq_len,
         .learning_rate = lr,
+        .batch_size = batch_size,
         .checkpoint_frequency = save_every,
         .checkpoint_dir = checkpoint_dir,
     };

@@ -117,14 +117,14 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !struct {
 
 fn writeInt(file: std.fs.File, value: usize) !void {
     var buf: [@sizeOf(usize)]u8 = undefined;
-    std.mem.writeInt(usize, buf[0..], value, .little);
+    std.mem.writeInt(usize, &buf, value, .little);
     try file.writeAll(&buf);
 }
 
 fn writeFloat(file: std.fs.File, value: f32) !void {
     var buf: [@sizeOf(f32)]u8 = undefined;
     const bits: u32 = @bitCast(value);
-    std.mem.writeInt(u32, buf[0..], bits, .little);
+    std.mem.writeInt(u32, &buf, bits, .little);
     try file.writeAll(&buf);
 }
 

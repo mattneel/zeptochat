@@ -88,6 +88,7 @@ pub fn build(b: *std.Build) void {
     root_module.addImport("train_runner", train_runner_module);
     root_module.addImport("checkpoint", checkpoint_module);
     root_module.addImport("generation", generation_module);
+    root_module.addImport("transformer", transformer_module);
 
     test_module.addImport("tokenizer", tokenizer_module);
     test_module.addImport("transformer", transformer_module);

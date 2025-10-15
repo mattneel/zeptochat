@@ -48,6 +48,71 @@ set -euo pipefail
 zig build -Doptimize=ReleaseFast run -- generate "$@"
 """
 
+[tasks."tinystories:prepare"]
+description = "Download TinyStories and create 50k-line subset"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p data
+SOURCE_PATH="data/TinyStoriesV2-GPT4-train.txt"
+SUBSET_PATH="data/tinystories_50k.txt"
+URL="https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt"
+
+if [ ! -f "$SOURCE_PATH" ]; then
+  echo "Downloading TinyStories dataset..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -L "$URL" -o "$SOURCE_PATH"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$SOURCE_PATH" "$URL"
+  else
+    echo "Error: need curl or wget to download TinyStories" >&2
+    exit 1
+  fi
+else
+  echo "TinyStories dataset already present at $SOURCE_PATH"
+fi
+
+echo "Writing 50k-line subset to $SUBSET_PATH"
+head -n 50000 "$SOURCE_PATH" > "$SUBSET_PATH"
+echo "Done. Subset size: $(wc -l < "$SUBSET_PATH") lines"
+"""
+
+[tasks."tinystories:tokenize"]
+description = "Tokenize TinyStories subset with Zeptochat CLI (ReleaseFast)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+zig build -Doptimize=ReleaseFast run -- tokenize data/tinystories_50k.txt data/tinystories_50k.tokens tests/fixtures/gpt2_mini
+"""
+
+[tasks."tinystories:train"]
+description = "Train TinyConfig model on TinyStories subset (ReleaseFast)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+zig build -Doptimize=ReleaseFast run -- train data/tinystories_50k.tokens 10 32 0.0005 1 checkpoints 4
+"""
+
+[tasks."tinystories:train-fast"]
+description = "Train TinyConfig model on TinyStories subset with larger batches (ReleaseFast)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+zig build -Doptimize=ReleaseFast run -- train data/tinystories_50k.tokens 10 32 0.0005 1 checkpoints 64
+"""
+
+[tasks."tinystories:chat"]
+description = "Chat with TinyStories checkpoint (ReleaseFast)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+CHECKPOINT="${1:-checkpoints/model_epoch1.ckpt}"
+PROMPT="${2:-Once upon a time}"
+MAX_TOKENS="${3:-128}"
+TEMPERATURE="${4:-0.8}"
+zig build -Doptimize=ReleaseFast run -- generate "$CHECKPOINT" tests/fixtures/gpt2_mini "$PROMPT" "$MAX_TOKENS" "$TEMPERATURE"
+"""
+
 [tasks.bench]
 description = "Run benchmarks"
 run = "zig build bench -Doptimize=ReleaseFast"

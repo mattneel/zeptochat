@@ -1,4 +1,5 @@
 const std = @import("std");
+const parallel = @import("parallel");
 
 pub const ModelConfig = struct {
     vocab_size: usize,
@@ -18,6 +19,8 @@ pub const TinyConfig = ModelConfig{
     .n_layers = 2,
     .dropout = 0.0,
 };
+
+var global_thread_pool: ?*parallel.ThreadPool = null;
 
 pub const LayerNorm = struct {
     weight: []f32,
@@ -896,6 +899,80 @@ fn matmul(
 ) ![]f32 {
     const c = try allocator.alloc(f32, M * N);
 
+    const maybe_pool = global_thread_pool;
+    const work_size = M * N;
+    const parallel_threshold: usize = 8192;
+
+    if (maybe_pool) |pool| parallel_block: {
+        const worker_count = pool.threadCount();
+        if (worker_count > 1 and work_size >= parallel_threshold and M >= 2) {
+            const MatmulContext = struct {
+                a: []const f32,
+                b: []const f32,
+                c: []f32,
+                K: usize,
+                N: usize,
+            };
+
+            var ctx = MatmulContext{
+                .a = a,
+                .b = b,
+                .c = c,
+                .K = K,
+                .N = N,
+            };
+
+            const rows_per_job = @max(@as(usize, 1), (M + worker_count - 1) / worker_count);
+            const job_capacity = @min(worker_count, (M + rows_per_job - 1) / rows_per_job);
+
+            const Job = struct {
+                ctx: *MatmulContext,
+                start_row: usize,
+                end_row: usize,
+            };
+
+            const jobs = allocator.alloc(Job, job_capacity) catch break :parallel_block;
+            defer allocator.free(jobs);
+
+            const Runner = struct {
+                fn run(job_ptr: *Job) void {
+                    const job = job_ptr.*;
+                    const context = job.ctx;
+                    var row = job.start_row;
+                    while (row < job.end_row) : (row += 1) {
+                        const row_offset = row * context.N;
+                        for (0..context.N) |j| {
+                            var sum: f32 = 0;
+                            const a_row = context.a[row * context.K ..];
+                            const b_col_index = j;
+                            for (0..context.K) |k| {
+                                sum += a_row[k] * context.b[k * context.N + b_col_index];
+                            }
+                            context.c[row_offset + j] = sum;
+                        }
+                    }
+                }
+            };
+
+            var job_count: usize = 0;
+            var start_row: usize = 0;
+            while (start_row < M) {
+                const end_row = @min(start_row + rows_per_job, M);
+                jobs[job_count] = .{
+                    .ctx = &ctx,
+                    .start_row = start_row,
+                    .end_row = end_row,
+                };
+                try pool.submit(Job, Runner.run, &jobs[job_count]);
+                job_count += 1;
+                start_row = end_row;
+            }
+
+            pool.wait();
+            return c;
+        }
+    }
+
     for (0..M) |i| {
         for (0..N) |j| {
             var sum: f32 = 0;
@@ -1114,6 +1191,7 @@ pub const Transformer = struct {
     cached_tokens: ?[]u32 = null,
     cached_final_hidden: ?[]f32 = null,
     forward_seq_len: usize = 0,
+    thread_pool: ?*parallel.ThreadPool = null,
 
     pub fn init(allocator: std.mem.Allocator, config: ModelConfig) !Transformer {
         const token_embeddings = try allocator.alloc(f32, config.vocab_size * config.d_model);
@@ -1180,6 +1258,7 @@ pub const Transformer = struct {
             .grad_token_embeddings = grad_token_embeddings,
             .grad_position_embeddings = grad_position_embeddings,
             .grad_lm_head = grad_lm_head,
+            .thread_pool = null,
         };
     }
 
@@ -1197,10 +1276,20 @@ pub const Transformer = struct {
         if (self.cached_final_hidden) |buf| self.allocator.free(buf);
     }
 
+    pub fn setThreadPool(self: *Transformer, pool: ?*parallel.ThreadPool) void {
+        self.thread_pool = pool;
+    }
+
     pub fn forward(self: *Transformer, tokens: []const u32) ![]f32 {
         const seq_len = tokens.len;
         const d_model = self.config.d_model;
         const vocab_size = self.config.vocab_size;
+
+        const prev_pool = global_thread_pool;
+        if (self.thread_pool) |pool| {
+            global_thread_pool = pool;
+        }
+        defer global_thread_pool = prev_pool;
 
         self.forward_seq_len = seq_len;
 
@@ -1248,6 +1337,12 @@ pub const Transformer = struct {
         const final_hidden = self.cached_final_hidden orelse return error.ForwardNotCalled;
         const seq_len = self.forward_seq_len;
         if (seq_len == 0) return error.ForwardNotCalled;
+
+        const prev_pool = global_thread_pool;
+        if (self.thread_pool) |pool| {
+            global_thread_pool = pool;
+        }
+        defer global_thread_pool = prev_pool;
 
         const d_model = self.config.d_model;
         const vocab_size = self.config.vocab_size;

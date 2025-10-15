@@ -4,6 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const clap_dep = b.dependency("clap", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const clap_module = clap_dep.module("clap");
+
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -29,6 +35,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const parallel_module = b.createModule(.{
+        .root_source_file = b.path("src/parallel.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const tokenizer_module = b.createModule(.{
         .root_source_file = b.path("src/tokenizer.zig"),
         .target = target,
@@ -51,6 +62,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     optimizer_module.addImport("transformer", transformer_module);
+    transformer_module.addImport("parallel", parallel_module);
     const training_module = b.createModule(.{
         .root_source_file = b.path("src/training.zig"),
         .target = target,
@@ -83,12 +95,15 @@ pub fn build(b: *std.Build) void {
     train_runner_module.addImport("optimizer", optimizer_module);
     train_runner_module.addImport("training", training_module);
     train_runner_module.addImport("checkpoint", checkpoint_module);
+    train_runner_module.addImport("parallel", parallel_module);
 
+    root_module.addImport("clap", clap_module);
     root_module.addImport("tokenizer", tokenizer_module);
     root_module.addImport("train_runner", train_runner_module);
     root_module.addImport("checkpoint", checkpoint_module);
     root_module.addImport("generation", generation_module);
     root_module.addImport("transformer", transformer_module);
+    root_module.addImport("parallel", parallel_module);
 
     test_module.addImport("tokenizer", tokenizer_module);
     test_module.addImport("transformer", transformer_module);
@@ -96,6 +111,7 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("optimizer", optimizer_module);
     test_module.addImport("training", training_module);
     test_module.addImport("checkpoint", checkpoint_module);
+    test_module.addImport("parallel", parallel_module);
 
     const tests = b.addTest(.{
         .root_module = test_module,

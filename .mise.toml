@@ -82,7 +82,7 @@ description = "Tokenize TinyStories subset with Zeptochat CLI (ReleaseFast)"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-zig build -Doptimize=ReleaseFast run -- tokenize data/tinystories_50k.txt data/tinystories_50k.tokens tests/fixtures/gpt2_mini
+zig build -Doptimize=ReleaseFast run -- tokenize data/tinystories_50k.txt data/tinystories_50k.tokens --tokenizer-dir tests/fixtures/gpt2_mini
 """
 
 [tasks."tinystories:train"]
@@ -90,7 +90,7 @@ description = "Train TinyConfig model on TinyStories subset (ReleaseFast)"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-zig build -Doptimize=ReleaseFast run -- train data/tinystories_50k.tokens 10 32 0.0005 1 checkpoints 4
+zig build -Doptimize=ReleaseFast run -- train data/tinystories_50k.tokens --epochs 10 --seq-len 32 --learning-rate 0.0005 --save-every 1 --checkpoint-dir checkpoints --batch-size 4
 """
 
 [tasks."tinystories:train-fast"]
@@ -98,7 +98,7 @@ description = "Train TinyConfig model on TinyStories subset with larger batches 
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-zig build -Doptimize=ReleaseFast run -- train data/tinystories_50k.tokens 10 32 0.0005 1 checkpoints 64
+zig build -Doptimize=ReleaseFast run -- train data/tinystories_50k.tokens --config configs/train_fast.json
 """
 
 [tasks."tinystories:chat"]
@@ -110,7 +110,7 @@ CHECKPOINT="${1:-checkpoints/model_epoch1.ckpt}"
 PROMPT="${2:-Once upon a time}"
 MAX_TOKENS="${3:-128}"
 TEMPERATURE="${4:-0.8}"
-zig build -Doptimize=ReleaseFast run -- generate "$CHECKPOINT" tests/fixtures/gpt2_mini "$PROMPT" "$MAX_TOKENS" "$TEMPERATURE"
+zig build -Doptimize=ReleaseFast run -- generate "$CHECKPOINT" "$PROMPT" --tokenizer-dir tests/fixtures/gpt2_mini --max-tokens "$MAX_TOKENS" --temperature "$TEMPERATURE"
 """
 
 [tasks.bench]

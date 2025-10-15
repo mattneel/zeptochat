@@ -4,6 +4,7 @@ const dataset_mod = @import("dataset");
 const optimizer_mod = @import("optimizer");
 const training = @import("training");
 const checkpoint = @import("checkpoint");
+const parallel = @import("parallel");
 
 const Transformer = transformer.Transformer;
 const TinyConfig = transformer.TinyConfig;
@@ -22,6 +23,7 @@ pub const TrainConfig = struct {
     checkpoint_dir: []const u8 = "checkpoints",
     checkpoint_prefix: []const u8 = "model",
     checkpoint_frequency: usize = 1, // epochs
+    model: transformer.ModelConfig = transformer.TinyConfig,
 };
 
 pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
@@ -30,17 +32,17 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
         return error.InvalidBatchConfiguration;
     }
 
+    const model_config = config.model;
     var seq_len = config.seq_len;
     if (seq_len == 0) {
-        std.log.err("seq_len must be greater than zero", .{});
-        return error.InvalidSequenceLength;
+        seq_len = model_config.context_length;
     }
-    if (seq_len > TinyConfig.context_length) {
+    if (seq_len > model_config.context_length) {
         std.log.warn(
-            "seq_len {d} exceeds TinyConfig context length {d}; clamping to {d}",
-            .{ seq_len, TinyConfig.context_length, TinyConfig.context_length },
+            "seq_len {d} exceeds model context length {d}; clamping to {d}",
+            .{ seq_len, model_config.context_length, model_config.context_length },
         );
-        seq_len = TinyConfig.context_length;
+        seq_len = model_config.context_length;
     }
 
     std.log.info("Loading tokens from {s}…", .{config.tokens_path});
@@ -48,7 +50,19 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
     defer dataset.deinit();
     std.log.info("Loaded {d} tokens", .{dataset.tokens.len});
 
-    var model = try Transformer.init(allocator, TinyConfig);
+    std.log.info(
+        "Model config: vocab={d}, context={d}, d_model={d}, heads={d}, layers={d}, dropout={d:.3}",
+        .{
+            model_config.vocab_size,
+            model_config.context_length,
+            model_config.d_model,
+            model_config.n_heads,
+            model_config.n_layers,
+            model_config.dropout,
+        },
+    );
+
+    var model = try Transformer.init(allocator, model_config);
     defer model.deinit();
 
     const total_params = AdamW.countParams(&model);
@@ -57,6 +71,10 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
     defer optimizer.deinit();
 
     model.zeroGrad();
+
+    var thread_pool = try parallel.ThreadPool.init(allocator, 0);
+    defer thread_pool.deinit();
+    model.setThreadPool(&thread_pool);
 
     try std.fs.cwd().makePath(config.checkpoint_dir);
 
@@ -148,16 +166,44 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
 
             const batch_size = config.batch_size;
             const seq_len_usize = seq_len;
-            const vocab_size = TinyConfig.vocab_size;
+            const vocab_size = model_config.vocab_size;
             const batch_size_f = @as(f64, @floatFromInt(batch_size));
             const inv_batch_f32: f32 = 1.0 / @as(f32, @floatFromInt(batch_size));
 
             var batch_loss_sum: f64 = 0;
 
+            var batch_node: ?std.Progress.Node = null;
+            var batch_label_buf: [std.Progress.Node.max_name_len]u8 = undefined;
+            if (batch_size > 1) {
+                batch_node = epoch_node.start("", batch_size);
+                if (batch_node) |*node| node.setEstimatedTotalItems(batch_size);
+            }
+            defer if (batch_node) |*node| node.end();
+
             for (0..batch_size) |sample_idx| {
                 const offset = sample_idx * seq_len_usize;
                 const sample_tokens = batch.tokens[offset..][0..seq_len_usize];
                 const sample_targets = batch.targets[offset..][0..seq_len_usize];
+
+                if (batch_node) |*node| {
+                    node.setName(std.fmt.bufPrint(
+                        &batch_label_buf,
+                        "sample {d}/{d}",
+                        .{ sample_idx + 1, batch_size },
+                    ) catch "sample");
+                }
+
+                const preview_now = timer.read();
+                const preview_elapsed = @as(f64, @floatFromInt(preview_now)) / ns_per_s_f;
+                if (preview_elapsed >= 0) {
+                    const progress_label = std.fmt.bufPrint(
+                        &progress_label_buf,
+                        "loss ---- tok/s ---- step {d}/{d} ({d}/{d})",
+                        .{ global_step, total_steps, sample_idx + 1, batch_size },
+                    ) catch "training";
+                    progress_root.setName(progress_label);
+                    last_label_update_ns = preview_now;
+                }
 
                 const logits = try model.forward(sample_tokens);
                 defer allocator.free(logits);
@@ -184,6 +230,50 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
                 }
 
                 try model.backward(grad_logits);
+
+                if (batch_node) |*node| {
+                    node.setCompletedItems(sample_idx + 1);
+                    node.setName(std.fmt.bufPrint(
+                        &batch_label_buf,
+                        "sample {d}/{d}",
+                        .{ sample_idx + 1, batch_size },
+                    ) catch "sample");
+                }
+
+                std.Progress.maybeRefresh();
+
+                const now_ns_sample = timer.read();
+                const since_last_sample = if (last_label_update_ns == 0) now_ns_sample else now_ns_sample - last_label_update_ns;
+                if (last_label_update_ns == 0 or since_last_sample >= label_update_period_ns) {
+                    const elapsed_ns_f = @as(f64, @floatFromInt(now_ns_sample));
+                    if (elapsed_ns_f > 0) {
+                        const elapsed_s = elapsed_ns_f / ns_per_s_f;
+                        const steps_f = @as(f64, @floatFromInt(global_step - 1)) +
+                            (@as(f64, @floatFromInt(sample_idx + 1)) / @as(f64, @floatFromInt(batch_size)));
+                        const batch_tokens_f = @as(f64, @floatFromInt(tokens_per_batch));
+                        const tokens_per_sec = if (elapsed_s == 0) 0 else (steps_f * batch_tokens_f) / elapsed_s;
+                        const partial_loss = batch_loss_sum / @as(f64, @floatFromInt(sample_idx + 1));
+                        const display_loss = if (ema_initialized)
+                            ema_loss * 0.95 + partial_loss * 0.05
+                        else
+                            partial_loss;
+                        const label = std.fmt.bufPrint(
+                            &progress_label_buf,
+                            "loss {d:.3} tok/s {d:.0} step {d}/{d} ({d}/{d})",
+                            .{
+                                display_loss,
+                                tokens_per_sec,
+                                global_step,
+                                total_steps,
+                                sample_idx + 1,
+                                batch_size,
+                            },
+                        ) catch "training";
+                        progress_root.setName(label);
+                        std.Progress.maybeRefresh();
+                        last_label_update_ns = now_ns_sample;
+                    }
+                }
             }
 
             optimizer.step(&model, config.learning_rate);
@@ -236,6 +326,7 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
                         .{ ema_loss, tok_str, elapsed_str, eta_epoch_str, eta_total_str },
                     ) catch "training";
                     progress_root.setName(label);
+                    std.Progress.maybeRefresh();
                     last_label_update_ns = now_ns;
                 }
             }

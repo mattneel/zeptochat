@@ -6,4 +6,5 @@ test {
     _ = @import("optimizer_test.zig");
     _ = @import("checkpoint_test.zig");
     _ = @import("training_test.zig");
+    _ = @import("parallel_test.zig");
 }

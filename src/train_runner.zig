@@ -11,6 +11,25 @@ const TinyConfig = transformer.TinyConfig;
 const Dataset = dataset_mod.Dataset;
 const AdamW = optimizer_mod.AdamW;
 
+const Worker = struct {
+    model: Transformer,
+    loss_sum: f64 = 0,
+};
+
+const WorkerContext = struct {
+    worker: *Worker,
+    batch_tokens: []const u32,
+    batch_targets: []const u32,
+    seq_len: usize,
+    vocab_size: usize,
+    inv_batch_f32: f32,
+    start_index: usize,
+    end_index: usize,
+    completed_samples: *std.atomic.Value(usize),
+    loss_out: *f64,
+    err: ?anyerror = null,
+};
+
 const ns_per_s = std.time.ns_per_s;
 const ns_per_s_f = @as(f64, @floatFromInt(ns_per_s));
 
@@ -32,7 +51,7 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
         return error.InvalidBatchConfiguration;
     }
 
-    const model_config = config.model;
+    var model_config = config.model;
     var seq_len = config.seq_len;
     if (seq_len == 0) {
         seq_len = model_config.context_length;
@@ -49,6 +68,19 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
     var dataset = try Dataset.init(allocator, config.tokens_path);
     defer dataset.deinit();
     std.log.info("Loaded {d} tokens", .{dataset.tokens.len});
+
+    var max_token: u32 = 0;
+    for (dataset.tokens) |tok| {
+        if (tok > max_token) max_token = tok;
+    }
+    const required_vocab = @as(usize, @intCast(max_token)) + 1;
+    if (required_vocab > model_config.vocab_size) {
+        std.log.warn(
+            "expanding vocab size from {d} to {d} to cover dataset tokens",
+            .{ model_config.vocab_size, required_vocab },
+        );
+        model_config.vocab_size = required_vocab;
+    }
 
     std.log.info(
         "Model config: vocab={d}, context={d}, d_model={d}, heads={d}, layers={d}, dropout={d:.3}",
@@ -75,6 +107,20 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
     var thread_pool = try parallel.ThreadPool.init(allocator, 0);
     defer thread_pool.deinit();
     model.setThreadPool(&thread_pool);
+
+    const max_workers = @max(@as(usize, 1), thread_pool.threadCount());
+    var workers = try allocator.alloc(Worker, max_workers);
+    defer {
+        for (workers) |*worker| worker.model.deinit();
+        allocator.free(workers);
+    }
+    for (workers) |*worker| {
+        worker.model = try Transformer.init(allocator, model_config);
+        copyTransformerParameters(&worker.model, &model);
+    }
+
+    var worker_contexts = try allocator.alloc(WorkerContext, max_workers);
+    defer allocator.free(worker_contexts);
 
     try std.fs.cwd().makePath(config.checkpoint_dir);
 
@@ -137,7 +183,7 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
         .estimated_total_items = total_steps,
     });
     defer progress_root.end();
-    progress_root.setName("loss ---- tok/s ---- t ----s");
+    progress_root.setName("L:---- tok:---- T:----");
 
     var progress_label_buf: [std.Progress.Node.max_name_len]u8 = undefined;
     var ema_loss: f64 = 0;
@@ -149,10 +195,12 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
         var iter = dataset.iterator(config.batch_size, seq_len);
 
         var epoch_node = progress_root.start("", steps_per_epoch);
+        epoch_node.setEstimatedTotalItems(steps_per_epoch);
+        epoch_node.setCompletedItems(0);
         var epoch_label_buf: [std.Progress.Node.max_name_len]u8 = undefined;
         const epoch_label = std.fmt.bufPrint(
             &epoch_label_buf,
-            "epoch {d}/{d}",
+            "ep {d}/{d} e:--",
             .{ epoch_idx + 1, config.epochs },
         ) catch "epoch";
         epoch_node.setName(epoch_label);
@@ -170,110 +218,88 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
             const batch_size_f = @as(f64, @floatFromInt(batch_size));
             const inv_batch_f32: f32 = 1.0 / @as(f32, @floatFromInt(batch_size));
 
-            var batch_loss_sum: f64 = 0;
+            var completed_samples = std.atomic.Value(usize).init(0);
 
             var batch_node: ?std.Progress.Node = null;
-            var batch_label_buf: [std.Progress.Node.max_name_len]u8 = undefined;
             if (batch_size > 1) {
                 batch_node = epoch_node.start("", batch_size);
-                if (batch_node) |*node| node.setEstimatedTotalItems(batch_size);
+                batch_node.?.setEstimatedTotalItems(batch_size);
+                batch_node.?.setCompletedItems(0);
             }
-            defer if (batch_node) |*node| node.end();
+            defer if (batch_node) |node| node.end();
 
-            for (0..batch_size) |sample_idx| {
-                const offset = sample_idx * seq_len_usize;
-                const sample_tokens = batch.tokens[offset..][0..seq_len_usize];
-                const sample_targets = batch.targets[offset..][0..seq_len_usize];
+            const active_workers = @min(max_workers, batch_size);
+            const chunk_size = (batch_size + active_workers - 1) / active_workers;
 
-                if (batch_node) |*node| {
-                    node.setName(std.fmt.bufPrint(
-                        &batch_label_buf,
-                        "sample {d}/{d}",
-                        .{ sample_idx + 1, batch_size },
-                    ) catch "sample");
-                }
+            var job_count: usize = 0;
+            var start_index: usize = 0;
+            while (start_index < batch_size) {
+                const end_index = @min(start_index + chunk_size, batch_size);
+                var worker = &workers[job_count];
+                copyTransformerParameters(&worker.model, &model);
+                worker.model.zeroGrad();
+                worker.loss_sum = 0;
 
-                const preview_now = timer.read();
-                const preview_elapsed = @as(f64, @floatFromInt(preview_now)) / ns_per_s_f;
-                if (preview_elapsed >= 0) {
-                    const progress_label = std.fmt.bufPrint(
+                worker_contexts[job_count] = .{
+                    .worker = worker,
+                    .batch_tokens = batch.tokens,
+                    .batch_targets = batch.targets,
+                    .seq_len = seq_len_usize,
+                    .vocab_size = vocab_size,
+                    .inv_batch_f32 = inv_batch_f32,
+                    .start_index = start_index,
+                    .end_index = end_index,
+                    .completed_samples = &completed_samples,
+                    .loss_out = &worker.loss_sum,
+                    .err = null,
+                };
+                const ctx = &worker_contexts[job_count];
+                try thread_pool.submit(WorkerContext, workerJob, ctx);
+
+                job_count += 1;
+                start_index = end_index;
+            }
+
+            var observed_samples: usize = 0;
+            while (true) {
+                const done = completed_samples.load(.acquire);
+                if (done > observed_samples) {
+                    observed_samples = done;
+                    updateBatchProgress(
+                        &timer,
+                        progress_root,
+                        epoch_node,
+                        batch_node,
+                        done,
+                        batch_size,
+                        seq_len_usize,
+                        global_step,
+                        total_steps,
+                        steps_per_epoch,
+                        epoch_idx,
+                        config.epochs,
+                        tokens_per_batch,
+                        ema_loss,
                         &progress_label_buf,
-                        "loss ---- tok/s ---- step {d}/{d} ({d}/{d})",
-                        .{ global_step, total_steps, sample_idx + 1, batch_size },
-                    ) catch "training";
-                    progress_root.setName(progress_label);
-                    last_label_update_ns = preview_now;
+                        &epoch_label_buf,
+                        &last_label_update_ns,
+                    );
                 }
+                if (done >= batch_size) break;
+                std.Thread.sleep(ns_per_s / 200);
+            }
 
-                const logits = try model.forward(sample_tokens);
-                defer allocator.free(logits);
+            thread_pool.wait();
 
-                const loss_f32 = training.crossEntropyLoss(
-                    logits,
-                    sample_targets,
-                    seq_len_usize,
-                    vocab_size,
-                );
-                batch_loss_sum += @as(f64, loss_f32);
-
-                const grad_logits = try training.crossEntropyGrad(
-                    allocator,
-                    logits,
-                    sample_targets,
-                    seq_len_usize,
-                    vocab_size,
-                );
-                defer allocator.free(grad_logits);
-
-                if (batch_size > 1) {
-                    for (grad_logits) |*g| g.* *= inv_batch_f32;
-                }
-
-                try model.backward(grad_logits);
-
-                if (batch_node) |*node| {
-                    node.setCompletedItems(sample_idx + 1);
-                    node.setName(std.fmt.bufPrint(
-                        &batch_label_buf,
-                        "sample {d}/{d}",
-                        .{ sample_idx + 1, batch_size },
-                    ) catch "sample");
-                }
-
-                std.Progress.maybeRefresh();
-
-                const now_ns_sample = timer.read();
-                const since_last_sample = if (last_label_update_ns == 0) now_ns_sample else now_ns_sample - last_label_update_ns;
-                if (last_label_update_ns == 0 or since_last_sample >= label_update_period_ns) {
-                    const elapsed_ns_f = @as(f64, @floatFromInt(now_ns_sample));
-                    if (elapsed_ns_f > 0) {
-                        const elapsed_s = elapsed_ns_f / ns_per_s_f;
-                        const steps_f = @as(f64, @floatFromInt(global_step - 1)) +
-                            (@as(f64, @floatFromInt(sample_idx + 1)) / @as(f64, @floatFromInt(batch_size)));
-                        const batch_tokens_f = @as(f64, @floatFromInt(tokens_per_batch));
-                        const tokens_per_sec = if (elapsed_s == 0) 0 else (steps_f * batch_tokens_f) / elapsed_s;
-                        const partial_loss = batch_loss_sum / @as(f64, @floatFromInt(sample_idx + 1));
-                        const display_loss = if (ema_initialized)
-                            ema_loss * 0.95 + partial_loss * 0.05
-                        else
-                            partial_loss;
-                        const label = std.fmt.bufPrint(
-                            &progress_label_buf,
-                            "loss {d:.3} tok/s {d:.0} step {d}/{d} ({d}/{d})",
-                            .{
-                                display_loss,
-                                tokens_per_sec,
-                                global_step,
-                                total_steps,
-                                sample_idx + 1,
-                                batch_size,
-                            },
-                        ) catch "training";
-                        progress_root.setName(label);
-                        std.Progress.maybeRefresh();
-                        last_label_update_ns = now_ns_sample;
-                    }
-                }
+            var batch_loss_sum: f64 = 0;
+            var worker_index: usize = 0;
+            while (worker_index < job_count) : (worker_index += 1) {
+                const ctx = worker_contexts[worker_index];
+                if (ctx.err) |err| return err;
+                const worker = &workers[worker_index];
+                batch_loss_sum += worker.loss_sum;
+                accumulateTransformerGradients(&model, &worker.model);
+                worker.model.zeroGrad();
             }
 
             optimizer.step(&model, config.learning_rate);
@@ -294,41 +320,26 @@ pub fn run(allocator: std.mem.Allocator, config: TrainConfig) !void {
 
             const now_ns = timer.read();
             const since_last = if (last_label_update_ns == 0) now_ns else now_ns - last_label_update_ns;
-            const update_label = last_label_update_ns == 0 or
-                (since_last >= label_update_period_ns) or
-                (epoch_steps == steps_per_epoch);
-
-            if (update_label) {
-                const elapsed_ns_f = @as(f64, @floatFromInt(now_ns));
-                if (elapsed_ns_f > 0) {
-                    const steps_f = @as(f64, @floatFromInt(global_step));
-                    const batch_tokens_f = @as(f64, @floatFromInt(tokens_per_batch));
-                    const tokens_per_sec = steps_f * batch_tokens_f * ns_per_s_f / elapsed_ns_f;
-                    const elapsed_s = elapsed_ns_f / ns_per_s_f;
-                    const secs_per_step = if (steps_f == 0 or elapsed_s == 0) 0 else elapsed_s / steps_f;
-                    const epoch_remaining = if (epoch_steps >= steps_per_epoch) 0 else steps_per_epoch - epoch_steps;
-                    const total_remaining = if (global_step >= total_steps) 0 else total_steps - global_step;
-                    const eta_epoch = secs_per_step * @as(f64, @floatFromInt(epoch_remaining));
-                    const eta_total = secs_per_step * @as(f64, @floatFromInt(total_remaining));
-
-                    var elapsed_buf: [12]u8 = undefined;
-                    var eta_epoch_buf: [12]u8 = undefined;
-                    var eta_total_buf: [12]u8 = undefined;
-                    var tok_buf: [12]u8 = undefined;
-                    const elapsed_str = formatCompactDuration(&elapsed_buf, elapsed_s);
-                    const eta_epoch_str = formatCompactDuration(&eta_epoch_buf, eta_epoch);
-                    const eta_total_str = formatCompactDuration(&eta_total_buf, eta_total);
-                    const tok_str = formatShortQuantity(&tok_buf, tokens_per_sec);
-
-                    const label = std.fmt.bufPrint(
-                        &progress_label_buf,
-                        "L:{d:.3} tok:{s} t:{s} e:{s} T:{s}",
-                        .{ ema_loss, tok_str, elapsed_str, eta_epoch_str, eta_total_str },
-                    ) catch "training";
-                    progress_root.setName(label);
-                    std.Progress.maybeRefresh();
-                    last_label_update_ns = now_ns;
-                }
+            if (last_label_update_ns == 0 or since_last >= label_update_period_ns or epoch_steps == steps_per_epoch) {
+                updateBatchProgress(
+                    &timer,
+                    progress_root,
+                    epoch_node,
+                    batch_node,
+                    batch_size,
+                    batch_size,
+                    seq_len_usize,
+                    global_step,
+                    total_steps,
+                    steps_per_epoch,
+                    epoch_idx,
+                    config.epochs,
+                    tokens_per_batch,
+                    ema_loss,
+                    &progress_label_buf,
+                    &epoch_label_buf,
+                    &last_label_update_ns,
+                );
             }
 
             const should_log = (global_step % steps_log_interval == 0) or
@@ -454,6 +465,202 @@ fn formatCheckpointName(
     epoch: usize,
 ) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/{s}_epoch{d}.ckpt", .{ dir, prefix, epoch });
+}
+
+fn workerJob(ctx: *WorkerContext) void {
+    var loss_sum: f64 = 0;
+
+    const worker = ctx.worker;
+    const allocator = worker.model.allocator;
+    const seq_len = ctx.seq_len;
+
+    var sample_index = ctx.start_index;
+    while (sample_index < ctx.end_index) : (sample_index += 1) {
+        const offset = sample_index * seq_len;
+        const sample_tokens = ctx.batch_tokens[offset .. offset + seq_len];
+        const sample_targets = ctx.batch_targets[offset .. offset + seq_len];
+
+        const logits = worker.model.forward(sample_tokens) catch |err| {
+            ctx.err = err;
+            return;
+        };
+        defer allocator.free(logits);
+
+        const loss_f32 = training.crossEntropyLoss(logits, sample_targets, seq_len, ctx.vocab_size);
+        loss_sum += @as(f64, loss_f32);
+
+        const grad_logits = training.crossEntropyGrad(
+            allocator,
+            logits,
+            sample_targets,
+            ctx.seq_len,
+            ctx.vocab_size,
+        ) catch |err| {
+            ctx.err = err;
+            return;
+        };
+        defer allocator.free(grad_logits);
+
+        for (grad_logits) |*g| g.* *= ctx.inv_batch_f32;
+
+        worker.model.backward(grad_logits) catch |err| {
+            ctx.err = err;
+            return;
+        };
+
+        _ = ctx.completed_samples.fetchAdd(1, .acq_rel) + 1;
+    }
+
+    ctx.loss_out.* = loss_sum;
+}
+
+fn updateBatchProgress(
+    timer: *std.time.Timer,
+    root_node: std.Progress.Node,
+    epoch_node: std.Progress.Node,
+    batch_node: ?std.Progress.Node,
+    samples_done: usize,
+    batch_size: usize,
+    seq_len: usize,
+    global_step: usize,
+    total_steps: usize,
+    steps_per_epoch: usize,
+    epoch_index: usize,
+    total_epochs: usize,
+    tokens_per_batch: usize,
+    ema_loss: f64,
+    root_label_buf: *[std.Progress.Node.max_name_len]u8,
+    epoch_label_buf: *[std.Progress.Node.max_name_len]u8,
+    last_label_update_ns: *u64,
+) void {
+    if (batch_node) |node| {
+        var handle = node;
+        handle.setCompletedItems(samples_done);
+        handle.setName(std.fmt.bufPrint(
+            epoch_label_buf,
+            "s {d}/{d}",
+            .{ samples_done, batch_size },
+        ) catch "sample");
+    }
+
+    const now_ns = timer.read();
+    const elapsed_ns_f = @as(f64, @floatFromInt(now_ns));
+    if (elapsed_ns_f == 0) return;
+
+    const elapsed_s = elapsed_ns_f / ns_per_s_f;
+    const tokens_processed = @as(f64, @floatFromInt((global_step - 1) * tokens_per_batch + samples_done * seq_len));
+    const tokens_per_sec = if (elapsed_s == 0) 0 else tokens_processed / elapsed_s;
+
+    const partial_step = @as(f64, @floatFromInt(samples_done)) / @as(f64, @floatFromInt(batch_size));
+    const steps_completed = @as(f64, @floatFromInt(global_step - 1)) + partial_step;
+    const secs_per_step = if (steps_completed == 0 or elapsed_s == 0) 0 else elapsed_s / steps_completed;
+
+    const epoch_steps_f = @as(f64, @floatFromInt(steps_per_epoch));
+    const step_in_epoch = (@as(f64, @floatFromInt((global_step - 1) % steps_per_epoch))) + partial_step;
+    const epoch_remaining = if (epoch_steps_f <= step_in_epoch) 0 else epoch_steps_f - step_in_epoch;
+    const total_steps_f = @as(f64, @floatFromInt(total_steps));
+    const total_remaining = if (total_steps_f <= steps_completed) 0 else total_steps_f - steps_completed;
+
+    const eta_epoch = secs_per_step * epoch_remaining;
+    const eta_total = secs_per_step * total_remaining;
+
+    var buf_eta_epoch: [12]u8 = undefined;
+    var buf_eta_total: [12]u8 = undefined;
+    var buf_tok: [12]u8 = undefined;
+    const eta_epoch_str = formatCompactDuration(&buf_eta_epoch, eta_epoch);
+    const eta_total_str = formatCompactDuration(&buf_eta_total, eta_total);
+    const tok_str = formatShortQuantity(&buf_tok, tokens_per_sec);
+
+    const root_label = std.fmt.bufPrint(
+        root_label_buf,
+        "L:{d:.3} tok:{s} T:{s}",
+        .{ ema_loss, tok_str, eta_total_str },
+    ) catch "root";
+    root_node.setName(root_label);
+
+    const epoch_label = std.fmt.bufPrint(
+        epoch_label_buf,
+        "ep {d}/{d} e:{s}",
+        .{ epoch_index + 1, total_epochs, eta_epoch_str },
+    ) catch "epoch";
+    epoch_node.setName(epoch_label);
+
+    const base_steps: usize = (global_step - 1) % steps_per_epoch;
+    const epoch_completed = base_steps + @intFromBool(samples_done == batch_size);
+    epoch_node.setCompletedItems(epoch_completed);
+    last_label_update_ns.* = now_ns;
+}
+
+fn copyTransformerParameters(dst: *Transformer, src: *const Transformer) void {
+    copySlice(dst.token_embeddings, src.token_embeddings);
+    copySlice(dst.position_embeddings, src.position_embeddings);
+    copySlice(dst.lm_head, src.lm_head);
+    copyLayerNormParams(&dst.ln_final, &src.ln_final);
+
+    for (dst.layers, src.layers) |*dst_layer, *src_layer| {
+        copyLayerNormParams(&dst_layer.ln1, &src_layer.ln1);
+        copyAttentionParams(&dst_layer.attn, &src_layer.attn);
+        copyLayerNormParams(&dst_layer.ln2, &src_layer.ln2);
+        copyMlpParams(&dst_layer.mlp, &src_layer.mlp);
+    }
+}
+
+fn accumulateTransformerGradients(dst: *Transformer, src: *const Transformer) void {
+    addSlice(dst.grad_token_embeddings, src.grad_token_embeddings);
+    addSlice(dst.grad_position_embeddings, src.grad_position_embeddings);
+    addSlice(dst.grad_lm_head, src.grad_lm_head);
+    addSlice(dst.ln_final.grad_weight, src.ln_final.grad_weight);
+    addSlice(dst.ln_final.grad_bias, src.ln_final.grad_bias);
+
+    for (dst.layers, src.layers) |*dst_layer, *src_layer| {
+        addSlice(dst_layer.ln1.grad_weight, src_layer.ln1.grad_weight);
+        addSlice(dst_layer.ln1.grad_bias, src_layer.ln1.grad_bias);
+        accumulateAttentionGradients(&dst_layer.attn, &src_layer.attn);
+        addSlice(dst_layer.ln2.grad_weight, src_layer.ln2.grad_weight);
+        addSlice(dst_layer.ln2.grad_bias, src_layer.ln2.grad_bias);
+        accumulateMlpGradients(&dst_layer.mlp, &src_layer.mlp);
+    }
+}
+
+fn copySlice(dst: []f32, src: []const f32) void {
+    @memcpy(dst, src);
+}
+
+fn addSlice(dst: []f32, src: []const f32) void {
+    for (dst, src) |*d, s| d.* += s;
+}
+
+fn copyLayerNormParams(dst: *transformer.LayerNorm, src: *const transformer.LayerNorm) void {
+    copySlice(dst.weight, src.weight);
+    copySlice(dst.bias, src.bias);
+}
+
+fn copyAttentionParams(dst: *transformer.MultiHeadAttention, src: *const transformer.MultiHeadAttention) void {
+    copySlice(dst.w_q, src.w_q);
+    copySlice(dst.w_k, src.w_k);
+    copySlice(dst.w_v, src.w_v);
+    copySlice(dst.w_o, src.w_o);
+}
+
+fn copyMlpParams(dst: *transformer.MLP, src: *const transformer.MLP) void {
+    copySlice(dst.w1, src.w1);
+    copySlice(dst.b1, src.b1);
+    copySlice(dst.w2, src.w2);
+    copySlice(dst.b2, src.b2);
+}
+
+fn accumulateAttentionGradients(dst: *transformer.MultiHeadAttention, src: *const transformer.MultiHeadAttention) void {
+    addSlice(dst.grad_w_q, src.grad_w_q);
+    addSlice(dst.grad_w_k, src.grad_w_k);
+    addSlice(dst.grad_w_v, src.grad_w_v);
+    addSlice(dst.grad_w_o, src.grad_w_o);
+}
+
+fn accumulateMlpGradients(dst: *transformer.MLP, src: *const transformer.MLP) void {
+    addSlice(dst.grad_w1, src.grad_w1);
+    addSlice(dst.grad_b1, src.grad_b1);
+    addSlice(dst.grad_w2, src.grad_w2);
+    addSlice(dst.grad_b2, src.grad_b2);
 }
 
 fn formatCompactDuration(buf: []u8, seconds: f64) []const u8 {
